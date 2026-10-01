@@ -1,0 +1,20 @@
+{
+  "name": "agent-memory-ledger",
+  "description": "Mémoire partagée et liste de travail pour agents de code (Claude Code et Codex) : chaque message devient une ligne de travail qui ne disparaît que sur preuve, les résultats de sous-agents ne s'oublient plus, l'historique survit aux compactages.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Nasro-B"
+  },
+  "homepage": "https://github.com/Nasro-B/agent-memory-ledger",
+  "repository": "https://github.com/Nasro-B/agent-memory-ledger",
+  "license": "MIT",
+  "keywords": [
+    "memoire",
+    "contexte",
+    "historique",
+    "sous-agents",
+    "hooks",
+    "claude-code",
+    "codex"
+  ]
+}

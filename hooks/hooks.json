@@ -1,0 +1,148 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 20,
+            "statusMessage": "Liste de travail : ce qui reste à faire..."
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/demarrage.js\" --agent claude",
+            "timeout": 15,
+            "statusMessage": "Mémoire du projet..."
+          }
+        ]
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/rappel.js\" --agent claude",
+            "timeout": 15,
+            "statusMessage": "Historique des 12 dernières heures..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 30,
+            "statusMessage": "Liste de travail : enregistrement du message..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Garde de la liste de travail..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 15,
+            "statusMessage": "Liste de travail : preuves [ctx]..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/commit.js\" --agent claude",
+            "timeout": 15,
+            "statusMessage": "Mémoire : journal du commit..."
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/marqueur.js\" --agent claude",
+            "timeout": 10,
+            "statusMessage": "Mémoire : marqueur de session..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Liste de travail : rappel de fin de tour..."
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/checkpoint.js\" --agent claude",
+            "timeout": 10,
+            "statusMessage": "Mémoire : point de contrôle..."
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Liste de travail : fin de sous-agent..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/avant-compactage.js\" --agent claude",
+            "timeout": 10,
+            "statusMessage": "Mémoire : état avant compactage..."
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/fin-session.js\" --agent claude",
+            "timeout": 10,
+            "statusMessage": "Mémoire : filet de fin de session..."
+          }
+        ]
+      }
+    ]
+  }
+}

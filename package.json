@@ -1,0 +1,19 @@
+{
+  "name": "agent-memory-ledger",
+  "version": "0.1.0",
+  "description": "Mémoire partagée et liste de travail pour agents de code (Claude Code et Codex).",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nasro-B/agent-memory-ledger.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
+    "test:rapide": "node --test --test-concurrency=1 --test-skip-pattern=\"^mutation\" tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
+    "verifier": "node scripts/verifier-public.js"
+  }
+}

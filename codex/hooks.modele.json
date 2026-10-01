@@ -1,0 +1,170 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 15,
+            "statusMessage": "Liste de travail : ce qui reste à faire"
+          }
+        ]
+      },
+      {
+        "matcher": "^(startup|resume)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/demarrage.js\" --agent codex",
+            "timeout": 15,
+            "statusMessage": "Mémoire du projet"
+          }
+        ]
+      },
+      {
+        "matcher": "^(compact|clear)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/rappel.js\" --agent codex",
+            "timeout": 15,
+            "statusMessage": "Historique des 12 dernières heures"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 15,
+            "statusMessage": "Liste de travail : enregistrement du message"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/rappel.js\" --agent codex",
+            "timeout": 15,
+            "statusMessage": "Mémoire : rappel après compactage"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Garde de la liste de travail"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 15,
+            "statusMessage": "Liste de travail : preuves [ctx]"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/commit.js\" --agent codex",
+            "timeout": 15,
+            "statusMessage": "Mémoire : journal du commit"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/marqueur.js\" --agent codex",
+            "timeout": 10,
+            "statusMessage": "Mémoire : marqueur de session"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/avant-compactage.js\" --agent codex",
+            "timeout": 10,
+            "statusMessage": "Mémoire : état avant compactage"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Liste de travail : réinjection après compactage"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/rappel.js\" --agent codex",
+            "timeout": 10,
+            "statusMessage": "Mémoire : rappel programmé"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Liste de travail : rappel de fin de tour"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/checkpoint.js\" --agent codex",
+            "timeout": 10,
+            "statusMessage": "Mémoire : point de contrôle"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/memoire/fin-session.js\" --agent codex",
+            "timeout": 15,
+            "statusMessage": "Mémoire : filet de travail non commité"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Liste de travail : suivi du sous-agent"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
+            "timeout": 10,
+            "statusMessage": "Liste de travail : fin de sous-agent"
+          }
+        ]
+      }
+    ]
+  }
+}
