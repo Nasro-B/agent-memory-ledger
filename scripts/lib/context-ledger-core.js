@@ -93,6 +93,8 @@
  *   tacheParAlias(agent, sessionId, alias) -> id|null
  *   texteLivraisons({agent, sessionId, dernierMessage}) -> rappel de fin de tour ('' si rien)
  *   texteFins(taches) -> annonce courte des fins qui viennent d'arriver
+ *   texteSuiviEnCours({agent, sessionId}) -> en cours de tour : fins pas encore annoncées à l'orchestrateur,
+ *        et rappel des résultats qui attendent (au plus une fois par délai) ; '' s'il n'y a rien à dire
  *
  * Preuves
  *   extraireMarqueurs(texte) -> [{id, partiel}]       [ctx C-0012], [ctx C-0012, C-0013], [ctx C-0012 partiel]
@@ -1127,6 +1129,7 @@ function suiteTranscript({ agent, sessionId, fichier, surLigne }) {
 const DELAI_REESSAI_MS = 6000;
 const MAX_LIVRAISONS = 20;
 const MAX_TACHES_CLOSES = 300;
+const RAPPEL_LIVRAISONS_MIN = 20;
 
 // « verrou occupé » est levé AVANT toute écriture : on réessaie (hooks parallèles, plusieurs sessions).
 function reessayer(fn) {
@@ -1181,7 +1184,7 @@ function finirTache({ agent, sessionId, id, statut, resultat, reprise }) {
   try { const l = lireLedger(t.projet, agent).lignes[t.ligne]; close = !l || TERMINAUX.includes(l.statut); } catch (_) { return null; }
   const marquer = ligne => reessayer(() => modifierSession(agent, sessionId, x => {
     const y = estObjet(x.taches) && x.taches[cle];
-    if (y) Object.assign(y, { ligne, fini: maintenantIso(), statut: st, resultat: res, clos: null });
+    if (y) Object.assign(y, { ligne, fini: maintenantIso(), statut: st, resultat: res, clos: null, annonce: null });
   }));
   if (!close) {
     if (t.fini) return null;
@@ -1249,11 +1252,16 @@ function texteLivraisons({ agent, sessionId, dernierMessage }) {
   try { etat = livraisons({ agent, sessionId }); } catch (_) { return ''; }
   const msg = chaine(dernierMessage);
   const attente = etat.attente.filter(t => !msg.includes(t.ligne)); // ancre-mutation:livraison-rappel
-  if (!attente.length) return '';
+  const nonDites = etat.attente.filter(t => !t.annonce);
+  if (!attente.length) { noterAnnonce(agent, sessionId, nonDites, false); return ''; } // citées : déjà connues
+  noterAnnonce(agent, sessionId, nonDites, true);
   const liste = attente.slice(0, MAX_LIVRAISONS).map(decrireTache).join(' ; ');
   const plus = attente.length > MAX_LIVRAISONS ? ` ; et ${attente.length - MAX_LIVRAISONS} autre(s)` : '';
-  const cours = etat.enCours.length ? ` Encore en cours : ${etat.enCours.length} (${etat.enCours.slice(0, MAX_LIVRAISONS).map(t => t.ligne).join(', ')}).` : '';
-  return `Sous-agents TERMINÉS dont le résultat n'est pas traité (${attente.length}) : ${liste}${plus}. Avant de t'arrêter : lis chaque résultat, vérifie-le, intègre-le, puis cite [ctx C-NNNN] dans l'historique ; sinon dis à l'utilisateur lesquels restent et pourquoi.${cours}`;
+  return `Sous-agents TERMINÉS dont le résultat n'est pas traité (${attente.length}) : ${liste}${plus}. Avant de t'arrêter : lis chaque résultat, vérifie-le, intègre-le, puis cite [ctx C-NNNN] dans l'historique ; sinon dis à l'utilisateur lesquels restent et pourquoi.${texteEnCours(etat)}`;
+}
+
+function texteEnCours(etat) {
+  return etat.enCours.length ? ` Encore en cours : ${etat.enCours.length} (${etat.enCours.slice(0, MAX_LIVRAISONS).map(t => t.ligne).join(', ')}).` : '';
 }
 
 // Texte court pour des sous-agents qui viennent de finir (fins = tâches rendues par finirTache).
@@ -1261,7 +1269,57 @@ function texteFins(fins) {
   const vus = new Set();
   const uniques = (fins || []).filter(t => t && !vus.has(t.ligne) && vus.add(t.ligne));
   if (!uniques.length) return '';
-  return `Sous-agent(s) terminé(s), résultat à traiter : ${uniques.map(decrireTache).join(' ; ')}. Ne les oublie pas : lis, vérifie et intègre chaque résultat avant de t'arrêter, puis cite [ctx C-NNNN] dans l'historique.`;
+  const plus = uniques.length > MAX_LIVRAISONS ? ` ; et ${uniques.length - MAX_LIVRAISONS} autre(s)` : '';
+  return `Sous-agent(s) terminé(s), résultat à traiter : ${uniques.slice(0, MAX_LIVRAISONS).map(decrireTache).join(' ; ')}${plus}. Ne les oublie pas : lis, vérifie et intègre chaque résultat avant de t'arrêter, puis cite [ctx C-NNNN] dans l'historique.`;
+}
+
+// Délai du rappel en cours de tour, en millisecondes (CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN, en minutes).
+function delaiRappelMs() {
+  const brut = process.env.CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN;
+  const v = brut === undefined || String(brut).trim() === '' ? NaN : Number(brut);
+  return (Number.isFinite(v) && v >= 0 ? v : RAPPEL_LIVRAISONS_MIN) * 60000;
+}
+
+// Retient que ces fins ont été dites à l'orchestrateur (et, si rappel, l'heure du dernier rappel complet).
+// Un échec d'écriture ne retient rien : la fin sera redite, ce qui vaut mieux qu'une fin jamais dite.
+function noterAnnonce(agent, sessionId, taches, rappel) {
+  if (!taches.length && !rappel) return;
+  try {
+    reessayer(() => modifierSession(agent, sessionId, x => {
+      const iso = maintenantIso();
+      if (estObjet(x.taches)) for (const t of taches) if (estObjet(x.taches[t.id])) x.taches[t.id].annonce = iso;
+      if (rappel) x.rappelLivraisons = iso;
+    }));
+  } catch (_) { /* redit au prochain événement */ }
+}
+
+// En cours de tour, sur un événement que l'orchestrateur lit avant de s'arrêter (outil, message, reprise).
+// Trouvé dans une session réelle : l'événement de fin du sous-agent marque la fin sans rien dire à
+// l'orchestrateur, et le rappel n'existait qu'en fin de tour ; un tour de plus de 4 heures a laissé
+// 7 résultats sans rappel.
+//  - fin pas encore dite à l'orchestrateur : annonce courte, une fois ;
+//  - résultat déjà annoncé qui attend depuis plus du délai : rappel de tout ce qui attend, au plus une
+//    fois par délai (20 minutes).
+function texteSuiviEnCours({ agent, sessionId }) {
+  validerAgent(agent);
+  const s = lireSession(agent, sessionId);
+  const taches = s && estObjet(s.taches) ? s.taches : {};
+  if (!Object.values(taches).some(t => estObjet(t) && t.fini && !t.clos)) return '';
+  let etat;
+  try { etat = livraisons({ agent, sessionId }); } catch (_) { return ''; }
+  if (!etat.attente.length) return '';
+  const nouvelles = etat.attente.filter(t => !t.annonce); // ancre-mutation:livraison-annonce
+  const delai = delaiRappelMs();
+  const age = iso => Date.now() - (Date.parse(iso || '') || 0);
+  // Délai compté depuis l'annonce, pas depuis la fin : une fin ancienne annoncée à l'instant n'est pas
+  // rappelée dans la foulée (constaté en réel : annonce puis rappel à une demi-seconde d'écart).
+  const rappeler = age(s.rappelLivraisons) >= delai && etat.attente.some(t => t.annonce && age(t.annonce) >= delai); // ancre-mutation:livraison-rappel-en-cours
+  if (!nouvelles.length && !rappeler) return '';
+  noterAnnonce(agent, sessionId, nouvelles, rappeler);
+  if (!rappeler) return texteFins(nouvelles);
+  const liste = etat.attente.slice(0, MAX_LIVRAISONS).map(t => `${t.ligne} « ${t.titre} »`).join(' ; ');
+  const plus = etat.attente.length > MAX_LIVRAISONS ? ` ; et ${etat.attente.length - MAX_LIVRAISONS} autre(s)` : '';
+  return `Rappel : ${etat.attente.length} sous-agent(s) TERMINÉ(S) dont le résultat n'est toujours pas traité : ${liste}${plus}. N'attends pas la fin du tour : dès que l'étape en cours est finie, lis chaque résultat (son chemin est dans la note de sa ligne), vérifie-le, intègre-le, puis cite [ctx C-NNNN] dans l'historique.${texteEnCours(etat)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1773,7 +1831,7 @@ module.exports = {
   ajouterDemande, ajouterLigne, classerSansTravail, changerEtat, abandonner, trouverProjetDe,
   lireSession, modifierSession, lierSession, projetDeSession, enregistrerMessage, rappelStop,
   secours, contexteEchecMessage, lireLignesDepuis, suiteTranscript,
-  suivreTache, finirTache, livraisons, tacheParAlias, texteLivraisons, texteFins,
+  suivreTache, finirTache, livraisons, tacheParAlias, texteLivraisons, texteFins, texteSuiviEnCours,
   extraireMarqueurs, marqueursAjoutes, estFichierPreuve, preuveCommit, preuvesDepuisOutil,
   appliquerPreuves, reconcilier,
   gardeOutil, texteToucheRacine, commandeViseRacine, appelleCli, commandeLectureOuCli,

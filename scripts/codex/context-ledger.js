@@ -398,8 +398,15 @@ function finDansLigne(ligne) {
   return /^\s*Message Type:\s*FINAL_ANSWER\b/.test(t) ? String(p.author) : null;
 }
 
+// Ce que l'orchestrateur doit lire avant la fin du tour : fins pas encore annoncées (SubagentStop marque une
+// fin sans rien lui dire) et rappel des résultats qui attendent. Le Stop bloquant reste le canal prouvé.
+function suiviEnCours(input) {
+  try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
+}
+
 // Filet de SubagentStop : réponses finales de sous-agents écrites dans le rollout de l'orchestrateur depuis
 // le dernier passage. Ne crée jamais de ligne (reprise = false) : il ne fait que marquer une première fin.
+// L'annonce à l'orchestrateur est faite par suiviEnCours, quel que soit l'événement qui a marqué la fin.
 function rattraperFins(input) {
   const fins = [];
   if (!input.transcript_path || !input.session_id) return fins;
@@ -434,7 +441,7 @@ function surSessionStart(input) {
   core.assurerVues(AGENT);
   prendreDrapeau(input.session_id);
   const cmd = core.commandes(SCRIPT, projet);
-  contexte('SessionStart', ajuster(null, core.contexteSession({ agent: AGENT, projet, script: SCRIPT }), REGLE_6BIS, cmd.lister));
+  contexte('SessionStart', ajuster(suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT }), REGLE_6BIS, cmd.lister));
 }
 
 // ---------------------------------------------------------------------------
@@ -548,20 +555,20 @@ function surUserPromptSubmit(input) {
     }
   }
   if (!enAttente) { try { reprendreEnAttente(); } catch (_) { /* rien */ } } // verrou occupé : reprise plus tard
-  let fins = [];
-  try { fins = rattraperFins(input); } catch (_) { /* rappelé en fin de tour */ }
+  try { rattraperFins(input); } catch (_) { /* rappelé en fin de tour */ }
   let r = vide();
   try { r = reconcilier(); } catch (_) { /* rien */ }
+  const fins = suiviEnCours(input); // après les preuves : un résultat prouvé traité n'est plus annoncé
   core.assurerVues(AGENT);
   const drapeau = prendreDrapeau(input.session_id);
   const projet = enr ? enr.projet : core.projetDeSession(AGENT, input.session_id, input.cwd);
   const cmd = core.commandes(SCRIPT, projet);
-  const haut = [drapeau ? APRES_COMPACTAGE : '', ligneResultat(r), core.texteFins(fins),
+  const haut = [drapeau ? APRES_COMPACTAGE : '', ligneResultat(r), fins,
     enAttente ? 'Message de l\'utilisateur reçu mais fichier contexte occupé : il est gardé en attente et sera enregistré (M-NNNN) au prochain événement. Traite-le comme un message à trier.' : '',
   ].filter(Boolean).join('\n');
   if (enr && enr.id && !enr.doublon) {
     contexte('UserPromptSubmit', ajuster(haut, core.contexteMessage({ agent: AGENT, projet, idMessage: enr.id, script: SCRIPT }), REGLE_6BIS, cmd.lister));
-  } else if (drapeau || enAttente || a_change(r) || fins.length) {
+  } else if (drapeau || enAttente || a_change(r) || fins) {
     contexte('UserPromptSubmit', ajuster(haut, core.contexteSession({ agent: AGENT, projet, script: SCRIPT }), drapeau || enAttente ? REGLE_6BIS : '', cmd.lister));
   }
 }
@@ -573,11 +580,11 @@ function ajouterResultat(total, r) {
 
 function surPostToolUse(input) {
   try { reprendreEnAttente(); } catch (_) { /* rien */ }
-  let fins = '';
-  try { fins = core.texteFins(rattraperFins(input)); } catch (_) { /* rappelé en fin de tour */ }
+  try { rattraperFins(input); } catch (_) { /* rappelé en fin de tour */ }
   const total = vide();
   try { ajouterResultat(total, reconcilier()); } catch (_) { /* rien */ }
   try { ajouterResultat(total, preuvesCommit(input)); } catch (_) { /* rien */ }
+  const fins = suiviEnCours(input); // après les preuves : un résultat prouvé traité n'est plus annoncé
   core.assurerVues(AGENT);
   const drapeau = prendreDrapeau(input.session_id);
   if (!drapeau && !a_change(total)) { // liste renvoyée seulement si elle a changé

@@ -11,7 +11,7 @@ Les hooks de ce plugin tiennent, sur disque, la liste de ce que l'utilisateur a 
 
 - Chaque message de l'utilisateur est enregistré mot pour mot : `M-NNNN`, section « À trier ».
 - La liste est réinjectée au début de session, après un compactage, et quand elle change.
-- Chaque sous-agent ou workflow lancé en arrière-plan reçoit une ligne `[agent]`. À sa fin, elle devient « TERMINÉ, résultat à traiter ».
+- Chaque sous-agent ou workflow lancé en arrière-plan reçoit une ligne `[agent]`. À sa fin, elle devient « TERMINÉ, résultat à traiter » : tu en es prévenu à ton prochain outil, puis rappelé toutes les 20 minutes tant que le résultat attend.
 - À chaque fin de tour, un rappel cite ce qui n'est ni fait ni mentionné dans ta réponse.
 
 Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemin et le bon projet. Utilise-la telle quelle.
@@ -23,7 +23,7 @@ Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemi
 3. **Lire la sortie de `ajouter`** avant de citer un identifiant : la numérotation est commune à tous les projets et à toutes les sessions.
 4. **Prouver pour retirer.** Aucune commande ne marque « fait ». Quand le travail est fait, cite `[ctx C-NNNN]` dans l'entrée d'historique qui le décrit, ou dans le message du commit. S'il n'est pas fini : `[ctx C-NNNN partiel]`. Le hook retire la ligne sur cette preuve écrite.
 5. **Dire l'état.** `etat --projet P C-NNNN en-cours|bloque-utilisateur|ouvert "note"`. `bloque-utilisateur` demande une raison : ce qui attend l'utilisateur.
-6. **Traiter les résultats de sous-agents avant de t'arrêter.** Lis le résultat, vérifie-le, intègre-le, puis cite `[ctx C-NNNN]`. Si tu ne peux pas dans ce tour, dis à l'utilisateur lequel reste et pourquoi.
+6. **Traiter les résultats de sous-agents sans attendre la fin du tour.** Dès que l'étape en cours est finie : lis le résultat, vérifie-le, intègre-le, puis cite `[ctx C-NNNN]`. Jamais de fin de tour avec un résultat non traité sans le dire : si tu ne peux pas dans ce tour, dis à l'utilisateur lequel reste et pourquoi.
 7. **Avant de dire « c'est fini » ou « il ne reste que »** : `lister --projet P`, et réponds depuis cette liste.
 
 ## Ce que tu ne fais jamais

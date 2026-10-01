@@ -8,7 +8,7 @@ Un agent de code oublie de quatre façons. Ce dépôt les ferme une par une, ave
 | --- | --- |
 | Une demande faite il y a deux heures, disparue au compactage | Chaque message est enregistré mot pour mot sur disque, puis transformé en lignes de travail. Une ligne ne se retire que sur preuve écrite. |
 | Un message envoyé pendant que l'agent travaille | Il est enregistré au prochain événement et rappelé en fin de tour tant qu'il n'est pas trié. |
-| Le résultat d'un sous-agent, arrivé pendant un autre travail | Chaque sous-agent lancé devient une ligne. À sa fin elle passe à « résultat à traiter », et le rappel revient à chaque fin de tour. |
+| Le résultat d'un sous-agent, arrivé pendant un autre travail | Chaque sous-agent lancé devient une ligne. À sa fin elle passe à « résultat à traiter » : l'agent principal en est prévenu à son prochain outil, puis rappelé toutes les 20 minutes pendant un tour long, et à chaque fin de tour. |
 | Ce qui a été fait hier, par cet agent ou par un autre | Chaque commit est journalisé, l'état des dépôts est sauvé avant un compactage, et l'historique récent est réinjecté après. |
 
 ## Comment ça marche
@@ -89,6 +89,7 @@ Dans `~/.agent-memory-ledger`, jamais dans vos dépôts. Pour un autre emplaceme
 | --- | --- |
 | `AGENT_MEMORY_LEDGER_HOME` | dossier de la mémoire (défaut : `~/.agent-memory-ledger`) |
 | `CONTEXT_LEDGER_SECOURS_DIR` | copie de secours du journal de la liste, de préférence sur un autre disque ; si le dossier principal est effacé, la liste est reconstruite depuis cette copie |
+| `CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN` | délai, en minutes, du rappel en cours de tour des résultats de sous-agents non traités (défaut : 20) |
 
 **Projets.** Le projet d'une session est le nom du dossier racine de son dépôt git (un worktree compte pour son dépôt). Pour regrouper plusieurs dossiers sous un nom, ou nommer un dossier qui n'est pas un dépôt, créez `projets.json` dans la maison :
 
@@ -105,7 +106,7 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 | Début de session | réinjecte ce qui reste | règles du projet, résumé, journaux récents, alerte de travail non documenté |
 | Message de l'utilisateur | enregistre mot pour mot | |
 | Avant un outil | refuse l'écriture à la main dans la liste | |
-| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) | journalise les commits, compte les fichiers modifiés |
+| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir et rappelle les résultats qui attendent, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) | journalise les commits, compte les fichiers modifiés |
 | Fin de tour | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités | point de contrôle toutes les deux heures |
 | Fin d'un sous-agent | marque son résultat « à traiter » | |
 | Avant compactage | | sauve l'état des dépôts |
@@ -118,24 +119,24 @@ Tout texte destiné au modèle tient sous 9 000 caractères. Ce qui ne tient pas
 
 Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 
-**Par bancs de tests** (sans modèle, payloads simulés) : 135 tests, tous verts.
+**Par bancs de tests** (sans modèle, payloads simulés) : 139 tests, tous verts.
 
 | Banc | Tests | Couvre |
 | --- | --- | --- |
-| `tests/context-ledger-claude.test.js` | 69 | noyau et adaptateur Claude Code |
-| `tests/context-ledger-codex.test.js` | 47 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
+| `tests/context-ledger-claude.test.js` | 71 | noyau et adaptateur Claude Code |
+| `tests/context-ledger-codex.test.js` | 49 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
 | `tests/memoire.test.js` | 14 | hooks de mémoire, détection de projet, installateur Codex |
 | `tests/verifier-public.test.js` | 5 | contrôle avant publication |
 
-Trente-sept mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien.
+Quarante-deux mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien.
 
 **En conditions réelles** :
 
-- Claude Code (2.1.284, Windows 11) : l'enregistrement des messages, y compris ceux envoyés pendant un tour, la garde, le retrait sur preuve, le rappel de fin de tour et l'inscription des sous-agents lancés ont été observés en session réelle, sur l'installation dont ce code est issu.
+- Claude Code (2.1.284, Windows 11) : l'enregistrement des messages, y compris ceux envoyés pendant un tour, la garde, le retrait sur preuve, le rappel de fin de tour, l'enregistrement des réponses à un questionnaire et la réinjection de la liste après deux compactages réels ont été observés en session réelle, sur l'installation dont ce code est issu. Sous-agents : dans une session qui en a lancé 24, chaque lancement a créé sa ligne et les 23 fins ont été marquées ; l'annonce à l'agent principal et le rappel en cours de tour ont été lus dans son transcript. C'est cette session qui a montré le défaut corrigé depuis : avant, un sous-agent fini pendant un tour long n'était rappelé qu'à la fin du tour, et 7 résultats avaient attendu plus de quatre heures sans rappel.
 - Ce dépôt lui-même, chargé par `claude --plugin-dir` (Claude Code 2.1.214) : le hook réel a enregistré mot pour mot le message de la session, dans une maison de test.
 - Codex (0.155) : la forme des événements a été vérifiée dans le code source de Codex et dans des sessions réelles ; les sorties sont validées contre le schéma de cette version.
 
-**Pas encore observé en conditions réelles** : la fin d'un sous-agent et son rappel ; la réinjection après un vrai compactage ; la liste de travail dans une session Codex ; l'installation par `/plugin install` ; les hooks d'outils et de fin de tour quand le code vient de ce dépôt plutôt que de l'installation d'origine ; macOS et Linux (développé et testé sous Windows 11, Node 22). Les hooks de mémoire sont une réécriture, commune aux deux agents, de hooks utilisés au quotidien : sous cette forme, ils sont prouvés par bancs.
+**Pas encore observé en conditions réelles** : le rappel de fin de tour quand des résultats de sous-agents attendent (la session observée n'a pas terminé de tour depuis) ; la liste de travail dans une session Codex ; l'installation par `/plugin install` ; les hooks d'outils et de fin de tour quand le code vient de ce dépôt plutôt que de l'installation d'origine ; macOS et Linux (développé et testé sous Windows 11, Node 22). Les hooks de mémoire sont une réécriture, commune aux deux agents, de hooks utilisés au quotidien : sous cette forme, ils sont prouvés par bancs.
 
 Si vous constatez un écart, ouvrez un ticket avec le payload du hook : c'est lui qui tranche.
 

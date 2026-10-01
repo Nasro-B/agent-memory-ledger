@@ -25,7 +25,7 @@ Après un compactage, ou à une reprise, c'est la liste de travail qui dit ce qu
 
 - Chaque message de l'utilisateur est enregistré mot pour mot dans la liste de travail (`M-NNNN`). Avant d'agir, le transformer en lignes de travail (`ajouter --de M-NNNN`), une ligne par travail demandé, ou le classer `sans-travail` avec sa raison.
 - Un problème trouvé en route et suivi nulle part s'inscrit aussi (`ajouter` sans `--de`).
-- Un sous-agent lancé reçoit une ligne `[agent]`. À sa fin, la ligne passe à « TERMINÉ, résultat à traiter » : lire le résultat, le vérifier, l'intégrer.
+- Un sous-agent lancé reçoit une ligne `[agent]`. À sa fin, la ligne passe à « TERMINÉ, résultat à traiter » : lire le résultat, le vérifier, l'intégrer. Sa fin est annoncée à l'agent principal à son prochain outil ; pendant un tour long, un rappel revient toutes les 20 minutes tant qu'un résultat attend.
 
 ## 4. Quand un travail est fait
 
@@ -67,7 +67,7 @@ Format, identique pour tous :
 | Début de session | `memoire/demarrage.js` | réinjecte la mémoire du projet |
 | Message de l'utilisateur | `context-ledger.js` | enregistre le message mot pour mot |
 | Avant un outil | `context-ledger.js` | refuse toute écriture à la main dans la liste de travail |
-| Après un outil | `context-ledger.js` | applique les preuves `[ctx]`, suit les sous-agents lancés |
+| Après un outil | `context-ledger.js` | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir et rappelle les résultats qui attendent |
 | Après un commit | `memoire/commit.js` | entrée signée dans le journal et le résumé |
 | Après une écriture de fichier | `memoire/marqueur.js` | compte le travail non documenté |
 | Fin de tour | `context-ledger.js` | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités |

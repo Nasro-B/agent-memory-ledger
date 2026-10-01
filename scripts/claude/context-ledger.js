@@ -224,11 +224,17 @@ function marquerFin(input, id, statut, reprise = false) {
   return core.finirTache({ agent: AGENT, sessionId: input.session_id, id, statut, reprise });
 }
 
+// Ce que l'orchestrateur doit lire avant la fin du tour : fins pas encore annoncées (SubagentStop marque
+// une fin sans rien lui dire) et rappel des résultats qui attendent. Le rappel de fin de tour reste le filet.
+function suiviEnCours(input) {
+  try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
+}
+
 // Enregistre les messages en file trouvés. Un message en file appartient au tour en cours : le début et la
 // clé du tour sont conservés, et le message s'ajoute aux messages du tour (rappel de fin de tour).
 // En cas d'échec, l'octet vu n'avance pas : le message sera réessayé au prochain événement.
 function rattraperMessagesEnFile(input) {
-  const bilan = { ids: [], messages: [], echecs: [], fins: [], projet: null };
+  const bilan = { ids: [], messages: [], echecs: [], projet: null };
   let suite = null;
   try { suite = suiteTranscript(input); } catch (_) { return bilan; }
   if (!suite) return bilan; // ancre-mutation:file-rattrapage
@@ -248,9 +254,10 @@ function rattraperMessagesEnFile(input) {
     bilan.projet = r.projet;
     rattacherAuTour(input, avant, r.id);
   }
-  // Fins de sous-agents et de workflows vues dans le transcript (filet de SubagentStop).
+  // Fins de sous-agents et de workflows vues dans le transcript (filet de SubagentStop). L'annonce à
+  // l'orchestrateur est faite par suiviEnCours, quel que soit l'événement qui a marqué la fin.
   for (const f of suite.fins || []) {
-    try { const t = marquerFin(input, f.id, f.statut); if (t) bilan.fins.push(t); } catch (_) { /* réessayé par SubagentStop ou au rappel */ }
+    try { marquerFin(input, f.id, f.statut); } catch (_) { /* réessayé par SubagentStop ou au rappel */ }
   }
   if (!bilan.echecs.length) {
     try { core.modifierSession(AGENT, input.session_id, s => { s.transcriptVu = suite.vu; }); } catch (_) { /* relu au prochain passage */ }
@@ -274,11 +281,10 @@ function surUserPromptSubmit(input) {
   // UserPromptSubmit se déclenche aussi pour les tours injectés : ce ne sont pas des messages de l'utilisateur.
   // Un tour ouvert par la fin d'un sous-agent marque sa livraison « à traiter » et le dit au modèle.
   if (prompt.trimStart().startsWith('<task-notification>')) {
-    const fins = [];
-    try { const f = finDeTache(prompt); const t = f ? marquerFin(input, f.id, f.statut) : null; if (t) fins.push(t); } catch (_) { /* rappelé en fin de tour */ }
-    let file = { ids: [], messages: [], echecs: [], fins: [], projet: null };
+    try { const f = finDeTache(prompt); if (f) marquerFin(input, f.id, f.statut); } catch (_) { /* rappelé en fin de tour */ }
+    let file = { ids: [], messages: [], echecs: [], projet: null };
     try { file = rattraperMessagesEnFile(input); } catch (_) { /* rien */ }
-    sortir('UserPromptSubmit', [texteMessagesEnFile(file), core.texteFins(fins.concat(file.fins || []))].filter(Boolean).join('\n'));
+    sortir('UserPromptSubmit', [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join('\n'));
     return;
   }
   try { core.assurerVues(AGENT); } catch (_) { /* l'enregistrement du message passe avant tout */ }
@@ -319,7 +325,7 @@ function surUserPromptSubmit(input) {
     const memeTour = avant && input.prompt_id && String(avant.promptCourant || '').split(':')[0] === input.prompt_id;
     if (memeTour && r && r.id && !r.doublon) rattacherAuTour(input, avant, r.id);
   }
-  const enFile = [texteMessagesEnFile(file), core.texteFins(file.fins)].filter(Boolean).join('\n');
+  const enFile = [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join('\n');
   if (r.doublon || !r.id) {
     if (enFile) sortir('UserPromptSubmit', enFile);
     return;
@@ -335,7 +341,7 @@ function surSessionStart(input) {
   try { file = rattraperMessagesEnFile(input); } catch (_) { /* la vue reste injectée */ }
   core.assurerVues(AGENT);
   sortir('SessionStart', ajuster(
-    [texteMessagesEnFile(file), core.texteFins(file.fins), core.contexteSession({ agent: AGENT, projet, script: SCRIPT })].filter(Boolean).join('\n'),
+    [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT })].filter(Boolean).join('\n'),
     REGLE_6BIS, core.commandes(SCRIPT, projet).lister)); // ancre-mutation:regle-6bis-session
 }
 
@@ -355,7 +361,7 @@ function reponsesQuestionnaire(input) {
 
 function surPostToolUse(input) {
   core.assurerVues(AGENT);
-  let file = { ids: [], echecs: [], fins: [], projet: null };
+  let file = { ids: [], echecs: [], projet: null };
   try { file = rattraperMessagesEnFile(input); } catch (_) { /* les preuves sont traitées quand même */ }
   // Réponses à un questionnaire : enregistrées comme un message de l'utilisateur reçu pendant le tour.
   const reponses = reponsesQuestionnaire(input);
@@ -383,12 +389,13 @@ function surPostToolUse(input) {
       suivi = `Fichier contexte : le sous-agent « ${lancee.titre.slice(0, 90)} » (${lancee.id}) n'a PAS pu être inscrit (${e && e.message ? e.message : e}) : inscris-le toi-même avec la commande ajouter.`;
     }
   }
-  const courts = [suivi, core.texteFins(file.fins)].filter(Boolean).join('\n');
   const p = core.preuvesDepuisOutil({
     toolName: input.tool_name, toolInput: input.tool_input, toolResponse: input.tool_response, cwd: input.cwd,
   });
   let resultat = p ? core.appliquerPreuves({ agent: AGENT, marqueurs: p.marqueurs, preuve: p.preuve }) : null;
   if (resultat && !resultat.faits.length && !resultat.partiels.length) resultat = null;
+  // Après les preuves : un résultat que cet outil vient de prouver traité n'est plus annoncé.
+  const courts = [suivi, suiviEnCours(input)].filter(Boolean).join('\n');
   const enFile = texteMessagesEnFile(file);
   // Liste renvoyée seulement si elle a changé (preuve) ou si un message est arrivé pendant le tour.
   if (!resultat && !enFile) {

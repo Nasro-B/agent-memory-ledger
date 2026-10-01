@@ -1393,6 +1393,9 @@ test('sous-agent en arrière-plan : une ligne le suit, sa fin la marque « à tr
   e = etat(dir);
   assert.equal(e.lignes['C-0001'].statut, 'ouvert');
   assert.match(e.lignes['C-0001'].note, /^TERMINÉ \(terminé\) le \d{4}-[\d: -]+ : résultat à lire, vérifier et intégrer : C:\\tmp\\tasks\\a1111111111111111\.output$/);
+  // SubagentStop ne dit rien à l'orchestrateur : la fin lui est annoncée à son prochain outil, une seule fois.
+  assert.match(contexte(postBash(dir, t)), /^Sous-agent\(s\) terminé\(s\), résultat à traiter : C-0001 « Lot A : export PDF » \(résultat : C:\\tmp\\tasks\\a1111111111111111\.output\)\. Ne les oublie pas/);
+  assert.equal(postBash(dir, t).out, '');
   // Le second finit aussi ; seule la notification écrite dans le transcript le dit (filet de SubagentStop).
   fs.appendFileSync(t, JSON.stringify({ type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: notificationFin('a2222222222222222'), commandMode: 'task-notification' } }) + '\n');
   assert.match(contexte(postBash(dir, t)), /Sous-agent\(s\) terminé\(s\), résultat à traiter : C-0002 « Lot B : droits »/);
@@ -1483,6 +1486,76 @@ test('sous-agent repris après la clôture de sa ligne : une nouvelle ligne suit
   assert.match(contexte(finDeTour(dir, t, 'p-2', 'Fini.')), /n'est pas traité \(1\) : C-0002 « Audit des prix »/);
 });
 
+// Trou trouvé dans une session réelle (22 sous-agents, un tour de plus de 4 heures) : une fin marquée par
+// SubagentStop n'était dite à l'orchestrateur qu'à sa fin de tour, et aucun rappel n'existait pendant le
+// tour. 7 résultats ont attendu sans que rien ne le lui redise.
+function avecDelaiRappel(minutes, fn) {
+  const avant = process.env.CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN;
+  process.env.CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN = String(minutes);
+  try { return fn(); } finally {
+    if (avant === undefined) delete process.env.CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN; else process.env.CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN = avant;
+  }
+}
+
+test('sous-agent fini pendant un tour long : annoncé au prochain outil, une seule fois, puis rappelé tant que le résultat attend', () => {
+  const dir = dossier('livraisons-en-cours');
+  const t = transcriptDe('livraisons-en-cours');
+  ups(dir, 'Lance un agent et continue le reste', { transcript_path: t });
+  cli(dir, ['sans-travail', '--projet', PROJET, 'M-0001', 'suivi par la ligne de l\'agent']);
+  lancementAgent(dir, 'a5555555555555555', 'Audit des taxes', { transcript_path: t });
+  lancementAgent(dir, 'a6666666666666666', 'Audit des stocks', { transcript_path: t });
+  const finEnDirect = id => hook(dir, {
+    hook_event_name: 'SubagentStop', session_id: 'sess-1', agent_id: id, agent_type: 'general-purpose', stop_hook_active: false, transcript_path: t,
+  });
+  assert.equal(finEnDirect('a5555555555555555').out, '');
+  // Comme dans la session réelle : la fin date de deux heures quand l'orchestrateur l'apprend enfin.
+  const ilYA2h = () => new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  avecRacine(dir, () => core.modifierSession('claude', 'sess-1', x => { x.taches.a5555555555555555.fini = ilYA2h(); }));
+  // Prochain outil de l'orchestrateur : la fin lui est dite, sans attendre la notification ni la fin du tour.
+  assert.match(contexte(postBash(dir, t)), /^Sous-agent\(s\) terminé\(s\), résultat à traiter : C-0001 « Audit des taxes » \(résultat : C:\\tmp\\tasks\\a5555555555555555\.output\)\. Ne les oublie pas/);
+  // Une seule fois : ni à l'outil suivant, ni quand la notification de cette même fin arrive ensuite. Et pas
+  // de rappel dans la foulée : le délai court depuis l'annonce, pas depuis la fin.
+  assert.equal(postBash(dir, t).out, '');
+  fs.appendFileSync(t, JSON.stringify({ type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: notificationFin('a5555555555555555'), commandMode: 'task-notification' } }) + '\n');
+  assert.equal(postBash(dir, t).out, '');
+  assert.equal(ups(dir, notificationFin('a5555555555555555'), { prompt_id: 'p-n', transcript_path: t }).out, '');
+  // Le tour continue sans fin de tour. Vingt minutes après l'annonce (délai par défaut), le rappel revient...
+  avecRacine(dir, () => core.modifierSession('claude', 'sess-1', x => { x.taches.a5555555555555555.annonce = ilYA2h(); }));
+  const rappel = contexte(postBash(dir, t));
+  assert.match(rappel, /^Rappel : 1 sous-agent\(s\) TERMINÉ\(S\) dont le résultat n'est toujours pas traité : C-0001 « Audit des taxes »\. N'attends pas la fin du tour/);
+  assert.match(rappel, /Encore en cours : 1 \(C-0002\)\.$/);
+  // ... une seule fois par délai, et une valeur illisible du réglage garde le défaut.
+  assert.equal(postBash(dir, t).out, '');
+  assert.equal(avecDelaiRappel('abc', () => postBash(dir, t)).out, '');
+  // Une nouvelle fin pendant qu'un rappel est dû : le rappel complet la contient, pas de double annonce.
+  finEnDirect('a6666666666666666');
+  const rappel2 = avecDelaiRappel(0, () => contexte(postBash(dir, t)));
+  assert.match(rappel2, /^Rappel : 2 sous-agent\(s\) TERMINÉ\(S\) dont le résultat n'est toujours pas traité : C-0001 « Audit des taxes » ; C-0002 « Audit des stocks »\./);
+  assert.ok(!rappel2.includes('Sous-agent(s) terminé(s)'));
+  assert.equal(postBash(dir, t).out, '');
+  // La preuve du premier résultat arrive par cet outil : il n'est plus rappelé, l'autre l'est encore.
+  const apres = avecDelaiRappel(0, () => contexte(postWrite(dir, histoire(dir), '- audit des taxes vérifié et intégré [ctx C-0001]\n', { transcript_path: t })));
+  assert.match(apres, /^Rappel : 1 sous-agent\(s\) TERMINÉ\(S\) dont le résultat n'est toujours pas traité : C-0002 « Audit des stocks »\./);
+  // Tout est prouvé : plus rien à rappeler, même délai passé.
+  postWrite(dir, histoire(dir), '- audit des stocks vérifié et intégré [ctx C-0002]\n', { transcript_path: t });
+  assert.equal(avecDelaiRappel(0, () => postBash(dir, t)).out, '');
+});
+
+test('fin de tour : le rappel vaut annonce, la fin n\'est pas redite à l\'outil suivant', () => {
+  const dir = dossier('livraisons-stop-annonce');
+  const t = transcriptDe('livraisons-stop-annonce');
+  ups(dir, 'Lance un agent', { transcript_path: t });
+  cli(dir, ['sans-travail', '--projet', PROJET, 'M-0001', 'suivi par la ligne de l\'agent']);
+  lancementAgent(dir, 'a7777777777777777', 'Audit des frais', { transcript_path: t });
+  hook(dir, { hook_event_name: 'SubagentStop', session_id: 'sess-1', agent_id: 'a7777777777777777', agent_type: 'general-purpose', stop_hook_active: false, transcript_path: t });
+  assert.match(contexte(finDeTour(dir, t, 'p-1', 'Agent lancé.')), /Sous-agents TERMINÉS dont le résultat n'est pas traité \(1\) : C-0001 « Audit des frais »/);
+  ups(dir, 'Suite', { prompt_id: 'p-2', transcript_path: t });
+  assert.equal(postBash(dir, t).out, '');
+  // Délai compté depuis ce rappel de fin de tour : il vient d'avoir lieu, donc rien avant 20 minutes.
+  const s = avecRacine(dir, () => core.lireSession('claude', 'sess-1'));
+  assert.ok(s.rappelLivraisons && s.taches.a7777777777777777.annonce);
+});
+
 // ---------------------------------------------------------------------------
 // Réponses à un questionnaire (outil AskUserQuestion) : une décision donnée par questionnaire doit être
 // enregistrée comme un message. Forme du payload : relevée dans les transcripts de Claude Code.
@@ -1520,18 +1593,23 @@ test('mutation : réponses de questionnaire non enregistrées -> banc rouge', { 
   assert.match(r.stdout, /not ok \d+ - questionnaire : les r/);
 });
 
-test('mutation : livraisons non inscrites, fin non marquée, rappel retiré, ou reprise non suivie -> banc rouge', { skip: EN_MUTATION }, () => {
-  const motif = 'sous-agent (en arri.re-plan|repris)';
+test('mutation : livraisons non inscrites, fin non marquée, rappel retiré, reprise non suivie, fin jamais annoncée, ou rappel en cours de tour retiré -> banc rouge', { skip: EN_MUTATION }, () => {
+  const motif = 'sous-agent (en arri.re-plan|repris|fini pendant)';
   const temoin = relancer(copie('temoin-livraisons'), motif);
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
+  const NOYAU = 'lib/context-ledger-core.js';
   const mutations = [
-    ['livraison-lancement', '  return null; // MUTATION : aucune ligne créée au lancement', /not ok \d+ - sous-agent en arri.re-plan/],
-    ['livraison-fin', '  return null; // MUTATION : fin de sous-agent non marquée', /not ok \d+ - sous-agent en arri.re-plan/],
-    ['livraison-rappel', '  const attente = []; // MUTATION : rappel des livraisons retiré', /not ok \d+ - sous-agent en arri.re-plan/],
-    ['livraison-reprise', '  return null; // MUTATION : nouveau résultat après clôture non suivi', /not ok \d+ - sous-agent repris/],
+    ['livraison-lancement', '  return null; // MUTATION : aucune ligne créée au lancement', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
+    ['livraison-fin', '  return null; // MUTATION : fin de sous-agent non marquée', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
+    ['livraison-rappel', '  const attente = []; // MUTATION : rappel des livraisons retiré', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
+    ['livraison-reprise', '  return null; // MUTATION : nouveau résultat après clôture non suivi', /not ok \d+ - sous-agent repris/, NOYAU],
+    ['livraison-annonce', '  const nouvelles = []; // MUTATION : fin marquée en silence jamais annoncée', /not ok \d+ - sous-agent fini pendant/, NOYAU],
+    ['livraison-rappel-en-cours', '  const rappeler = false; // MUTATION : rappel en cours de tour retiré', /not ok \d+ - sous-agent fini pendant/, NOYAU],
+    ['livraison-rappel-en-cours', '  const rappeler = age(s.rappelLivraisons) >= delai && etat.attente.some(t => t.annonce && age(t.fini) >= delai); // MUTATION : délai compté depuis la fin, rappel dans la foulée de l\'annonce', /not ok \d+ - sous-agent fini pendant/, NOYAU],
+    ['suivi-en-cours', "  return ''; // MUTATION : suivi en cours de tour débranché de l'adaptateur", /not ok \d+ - sous-agent fini pendant/, 'claude/context-ledger.js'],
   ];
-  for (const [ancre, remplacement, rouge] of mutations) {
-    const r = relancer(copie('mutation-' + ancre, 'lib/context-ledger-core.js', 'ancre-mutation:' + ancre, remplacement), motif);
+  for (const [ancre, remplacement, rouge, fichier] of mutations) {
+    const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), motif);
     assert.notEqual(r.status, 0, `la mutation ${ancre} doit rendre un banc rouge :\n` + r.stdout);
     assert.match(r.stdout, rouge, ancre);
   }

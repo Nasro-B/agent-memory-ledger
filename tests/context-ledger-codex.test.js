@@ -153,8 +153,9 @@ function lancer(args, env, entree, cwd) {
   });
 }
 
-async function hook(d, p, script = HOOK) {
-  const r = await lancer([script], envPour(d), typeof p === 'string' ? p : JSON.stringify(p), d);
+// plus : variables d'environnement propres à cet appel (les bancs tournent en parallèle : jamais process.env).
+async function hook(d, p, script = HOOK, plus = null) {
+  const r = await lancer([script], Object.assign(envPour(d), plus || {}), typeof p === 'string' ? p : JSON.stringify(p), d);
   const evt = typeof p === 'string' ? 'PreToolUse' : p.hook_event_name;
   assert.equal(r.code, 0, `code de sortie ${r.code} (${evt}) : ${r.err}`);
   const json = verifierSortie(evt, r.out);
@@ -654,6 +655,10 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     e = etat(d);
     assert.equal(e.lignes[c1].statut, 'ouvert');
     assert.ok(e.lignes[c1].note.startsWith('TERMINÉ (terminé) le ') && e.lignes[c1].note.endsWith(' : résultat à lire, vérifier et intégrer : ' + e1), e.lignes[c1].note);
+    // SubagentStop ne dit rien à l'orchestrateur : la fin lui est annoncée à son prochain outil, une seule fois.
+    const p0 = await hook(d, payload('PostToolUse', { transcript_path: parent }));
+    assert.ok(ctx(p0).startsWith(`Sous-agent(s) terminé(s), résultat à traiter : ${c1} « export_pdf (Ada) » (résultat : ${e1}). Ne les oublie pas`), ctx(p0));
+    assert.equal((await hook(d, payload('PostToolUse', { transcript_path: parent }))).out, '');
     // Le second finit aussi ; seule sa réponse finale dans le rollout de l'orchestrateur le dit (filet).
     fs.appendFileSync(parent, reponseFinale('/root/inconnu') + reponseFinale('/root/revue_export'));
     const p = await hook(d, payload('PostToolUse', { transcript_path: parent }));
@@ -719,6 +724,35 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     assert.match(e.lignes[c3].texte, /^\[agent\] « audit_routes \(Turing\) » \(codebase-explorer, th-7\)/);
     assert.equal(e.lignes[c3].statut, 'ouvert');
     assert.match(e.lignes[c3].note, /^TERMINÉ/);
+  });
+
+  // Trou trouvé dans une session réelle de Claude Code (un tour de plus de 4 heures, 7 résultats sans
+  // rappel) : le noyau est commun, le même suivi en cours de tour est branché ici.
+  test('sous-agents : tour long sans fin de tour -> fin annoncée une fois au prochain outil, puis rappel passé le délai, jusqu\'à la preuve', async () => {
+    const d = dossier('livraisons-en-cours');
+    const parent = rolloutParent(d);
+    const e1 = rolloutEnfant(d, 'th-5', { chemin: '/root/audit_taxes', surnom: 'Fermat', role: 'worker' });
+    await tourTrie(d, parent, 't1', 'lance un agent et continue');
+    await attendreBase(d);
+    await hook(d, payload('SubagentStart', { agent_id: 'th-5', agent_type: 'worker', transcript_path: e1 }));
+    const [c1] = Object.keys(etat(d).lignes);
+    await hook(d, payload('SubagentStop', { agent_id: 'th-5', agent_type: 'worker', agent_transcript_path: e1, transcript_path: parent }));
+    const outil = plus => hook(d, payload('PostToolUse', { transcript_path: parent }), HOOK, plus);
+    const DELAI_PASSE = { CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN: '0' };
+    assert.ok(ctx(await outil()).startsWith(`Sous-agent(s) terminé(s), résultat à traiter : ${c1} « audit_taxes (Fermat) »`));
+    assert.equal((await outil()).out, '', 'une seule annonce');
+    // Sa réponse finale arrive ensuite dans le rollout de l'orchestrateur : pas de seconde annonce.
+    fs.appendFileSync(parent, reponseFinale('/root/audit_taxes'));
+    assert.equal((await outil()).out, '');
+    const rappel = ctx(await outil(DELAI_PASSE));
+    assert.ok(rappel.startsWith(`Rappel : 1 sous-agent(s) TERMINÉ(S) dont le résultat n'est toujours pas traité : ${c1} « audit_taxes (Fermat) ». N'attends pas la fin du tour`), rappel);
+    assert.equal((await outil()).out, '', 'pas de rappel avant le délai (20 minutes par défaut)');
+    // Résultat prouvé : plus rien à rappeler, même délai passé.
+    ecrirePreuve(d, 'infra.codex.md', [`- audit des taxes vérifié et intégré [ctx ${c1}]`]);
+    const preuve = await outil(DELAI_PASSE);
+    assert.equal(etat(d).lignes[c1].statut, 'fait');
+    assert.ok(!ctx(preuve).includes('Rappel :'), ctx(preuve));
+    assert.equal((await outil(DELAI_PASSE)).out, '');
   });
 });
 
@@ -860,6 +894,7 @@ const MUTATIONS = [
   { nom: 'suivi-fin', motif: '^sous-agents', transformer: s => s.replace(/core\.finirTache\(\{[^\n]*\/\/ ancre-mutation:suivi-fin/, '// mutation') },
   { nom: 'stop-livraisons', motif: '^sous-agents', transformer: s => s.replace(/const livraisons = core\.texteLivraisons\([^\n]*\/\/ ancre-mutation:stop-livraisons/, "const livraisons = ''; // mutation") },
   { nom: 'filet-rollout', motif: '^sous-agents', transformer: s => s.replace('if (!r) return fins; // ancre-mutation:filet-rollout', 'return fins; // mutation') },
+  { nom: 'suivi-en-cours', motif: '^sous-agents', transformer: s => s.replace(/try \{ return core\.texteSuiviEnCours\([^\n]*\/\/ ancre-mutation:suivi-en-cours/, "return ''; // mutation") },
   { nom: 'reconciliateur', motif: 'preuve par contenu|réconciliateur|CRLF', transformer: s => s.replace(/const r = core\.reconcilier\(\{ agent: AGENT, base: basePreuves\(\) \}\);/, 'const r = { faits: [], partiels: [], ignores: [], projets: [] };') },
 ];
 

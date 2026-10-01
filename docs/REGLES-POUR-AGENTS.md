@@ -24,7 +24,8 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
 - Jamais de modification à la main du dossier `contexte`. Une ligne n'est abandonnée que sur citation exacte
   d'un message de l'utilisateur écrit APRÈS la création de la ligne (commande `abandon`).
 - Sous-agents : chaque sous-agent lancé reçoit une ligne `[agent]`, marquée « TERMINÉ, résultat à traiter » à
-  sa fin. Avant de s'arrêter : lire le résultat, le vérifier, l'intégrer, puis citer `[ctx C-NNNN]`. Sinon,
+  sa fin. Sa fin est annoncée au prochain outil, puis rappelée toutes les 20 minutes pendant un tour long :
+  ne pas attendre la fin du tour. Lire le résultat, le vérifier, l'intégrer, puis citer `[ctx C-NNNN]`. Sinon,
   dire à l'utilisateur lequel reste et pourquoi. Un sous-agent n'écrit jamais dans la liste.
 - Après un compactage, à une reprise, et avant toute réponse « il ne reste que » : c'est cette liste qui fait
   foi, pas le résumé de la conversation (`lister --projet P`).
