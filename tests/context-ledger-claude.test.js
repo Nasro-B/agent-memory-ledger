@@ -1483,6 +1483,43 @@ test('sous-agent repris après la clôture de sa ligne : une nouvelle ligne suit
   assert.match(contexte(finDeTour(dir, t, 'p-2', 'Fini.')), /n'est pas traité \(1\) : C-0002 « Audit des prix »/);
 });
 
+// ---------------------------------------------------------------------------
+// Réponses à un questionnaire (outil AskUserQuestion) : une décision donnée par questionnaire doit être
+// enregistrée comme un message. Forme du payload : relevée dans les transcripts de Claude Code.
+
+test('questionnaire : les réponses de l\'utilisateur sont enregistrées mot pour mot, une seule fois, et valent contre-ordre', () => {
+  const dir = dossier('questionnaire');
+  preparerLigne(dir);
+  const payload = {
+    hook_event_name: 'PostToolUse', session_id: 'sess-1', prompt_id: 'p-1', cwd: CWD_PROJET, tool_name: 'AskUserQuestion', tool_use_id: 'toolu_q1',
+    tool_input: { questions: [{ question: 'On garde le bouton de paiement ?' }] },
+    tool_response: { questions: [], answers: { 'On garde le bouton de paiement ?': 'Abandonne le bouton de paiement', 'Quelles pages ?': ['Accueil', 'Contact'] } },
+  };
+  const r = hook(dir, payload);
+  assert.match(contexte(r), /reçu\(s\) pendant ce tour, enregistré\(s\) mot pour mot : M-0002/);
+  const e = etat(dir);
+  assert.equal(e.demandes['M-0002'].texte, 'Réponses de l\'utilisateur à un questionnaire :\n« On garde le bouton de paiement ? » : « Abandonne le bouton de paiement »\n« Quelles pages ? » : « Accueil ; Contact »');
+  assert.equal(e.demandes['M-0002'].statut, 'a-trier');
+  assert.equal(hook(dir, payload).out, '', 'le même questionnaire ne crée pas deux M');
+  assert.deepEqual(Object.keys(etat(dir).demandes), ['M-0001', 'M-0002']);
+  // La décision donnée par questionnaire est écrite après la ligne : elle permet l'abandon.
+  const a = cli(dir, ['abandon', '--projet', PROJET, 'C-0001', 'Abandonne le bouton de paiement']);
+  assert.equal(a.code, 0, a.err);
+  assert.equal(etat(dir).lignes['C-0001'].statut, 'abandon-utilisateur');
+  // Questionnaire sans réponse, ou autre outil qui porte des « answers » : rien.
+  assert.equal(hook(dir, Object.assign({}, payload, { tool_use_id: 'toolu_q2', tool_response: {} })).out, '');
+  assert.equal(hook(dir, Object.assign({}, payload, { tool_use_id: 'toolu_q3', tool_name: 'Bash', tool_input: { command: 'ls' } })).out, '');
+  assert.deepEqual(Object.keys(etat(dir).demandes), ['M-0001', 'M-0002']);
+});
+
+test('mutation : réponses de questionnaire non enregistrées -> banc rouge', { skip: EN_MUTATION }, () => {
+  const temoin = relancer(copie('temoin-questionnaire'), '^questionnaire');
+  assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
+  const r = relancer(copie('mutation-questionnaire', 'claude/context-ledger.js', 'ancre-mutation:questionnaire', '      const r = null; // MUTATION : réponses non enregistrées'), '^questionnaire');
+  assert.notEqual(r.status, 0, 'la mutation doit rendre un banc rouge :\n' + r.stdout);
+  assert.match(r.stdout, /not ok \d+ - questionnaire : les r/);
+});
+
 test('mutation : livraisons non inscrites, fin non marquée, rappel retiré, ou reprise non suivie -> banc rouge', { skip: EN_MUTATION }, () => {
   const motif = 'sous-agent (en arri.re-plan|repris)';
   const temoin = relancer(copie('temoin-livraisons'), motif);

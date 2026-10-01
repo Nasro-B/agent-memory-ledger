@@ -56,9 +56,9 @@ function git(m, args) { return execFileSync('git', args, { cwd: m.repo, encoding
 
 function envPour(m) { return Object.assign({}, process.env, { AGENT_MEMORY_LEDGER_HOME: m.maison }); }
 
-function lancer(m, script, args, payload) {
+function lancer(m, script, args, payload, extraEnv) {
   const r = spawnSync(process.execPath, [path.join(SCRIPTS, script), ...args], {
-    input: payload === undefined ? '' : JSON.stringify(payload), env: envPour(m), encoding: 'utf8', cwd: m.base, timeout: 30000, windowsHide: true,
+    input: payload === undefined ? '' : JSON.stringify(payload), env: Object.assign(envPour(m), extraEnv || {}), encoding: 'utf8', cwd: m.base, timeout: 30000, windowsHide: true,
   });
   const out = (r.stdout || '').trim();
   let json = null;
@@ -66,7 +66,7 @@ function lancer(m, script, args, payload) {
   return { code: r.status, out, err: r.stderr || '', json };
 }
 
-const hook = (m, script, agent, payload) => lancer(m, path.join('memoire', script), ['--agent', agent], payload);
+const hook = (m, script, agent, payload, extraEnv) => lancer(m, path.join('memoire', script), ['--agent', agent], payload, extraEnv);
 const ctx = r => (r.json && r.json.hookSpecificOutput ? r.json.hookSpecificOutput.additionalContext : '');
 const histoire = (m, agent = 'claude') => path.join(m.maison, 'history', `${PROJET}.${agent}.md`);
 const lire = f => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '');
@@ -210,6 +210,23 @@ test('commit : entrée signée dans le journal et le résumé, marqueur retiré,
   const avant = lire(histoire(m));
   hook(m, 'commit.js', 'claude', { hook_event_name: 'PostToolUse', cwd: m.repo, tool_name: 'Bash', tool_input: { command: 'git commit -m "x"' }, tool_response: { stdout: '', stderr: 'error: gpg failed to sign the data', exit_code: 1 } });
   assert.equal(lire(histoire(m)), avant);
+});
+
+test('commit : git ne répond pas à temps -> rien n\'est écrit, mais le modèle est prévenu (jamais d\'oubli silencieux)', () => {
+  const m = monde('commit-delai');
+  commiter(m, 'premier.txt', 'chore: base');
+  commiter(m, 'a.txt', 'fix: lent');
+  const payload = { hook_event_name: 'PostToolUse', cwd: m.repo, tool_name: 'Bash', tool_input: { command: 'git commit -m "fix: lent"' }, tool_response: { stdout: '' } };
+  const r = hook(m, 'commit.js', 'claude', payload, { AML_DELAI_GIT_MS: '1' });
+  assert.match(ctx(r), /^Mémoire : ce commit n'a pas pu être journalisé \(git n'a pas répondu en \d+ s\)\. Écris toi-même son entrée dans .*projet-demo\.claude\.md/);
+  assert.equal(lire(histoire(m)), '');
+  // Côté Codex : même signalement, conforme au schéma de sortie.
+  const rc = hook(m, 'commit.js', 'codex', { hook_event_name: 'PostToolUse', cwd: m.repo, tool_name: 'exec_command', tool_input: { cmd: 'git commit -m "fix: lent"', workdir: m.repo }, tool_response: { output: 'ok' } }, { AML_DELAI_GIT_MS: '1' });
+  assert.deepEqual(erreursSortieCodex('PostToolUse', rc.out), []);
+  assert.match(ctx(rc), /n'a pas pu être journalisé/);
+  // Avec le délai normal, le même commit est journalisé.
+  hook(m, 'commit.js', 'claude', payload);
+  assert.match(lire(histoire(m)), /\| fix \| lent \(commit [0-9a-f]+\) \| Claude/);
 });
 
 test('commit et marqueur côté Codex : commande directe, code qui appelle exec_command, apply_patch ; journal signé Codex', () => {
@@ -469,7 +486,7 @@ function relancer(scripts, motif) {
 }
 
 test('mutation : citation prise pour un commit, marqueur gardé après commit, entrée doublée, drapeau pris par tous -> banc rouge', { skip: EN_MUTATION }, () => {
-  const motif = '^commit : entr|^rappel \\(Codex\\)';
+  const motif = '^commit : entr|^commit : git|^rappel \\(Codex\\)';
   const temoin = relancer(copie('temoin'), motif);
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
   const mutations = [
@@ -477,6 +494,7 @@ test('mutation : citation prise pour un commit, marqueur gardé après commit, e
     ['commit-marqueur', path.join('memoire', 'commit.js'), '    // MUTATION : marqueur gardé après le commit', /not ok \d+ - commit : entr/],
     ['journal-doublon', path.join('lib', 'memoire.js'), '  // MUTATION : dédoublonnage du journal retiré', /not ok \d+ - commit : entr/],
     ['rappel-drapeau', path.join('memoire', 'rappel.js'), '    const d = {}; // MUTATION : drapeau non vérifié', /not ok \d+ - rappel \(Codex\)/],
+    ['commit-delai', path.join('memoire', 'commit.js'), '      if (false) { // MUTATION : délai dépassé passé sous silence', /not ok \d+ - commit : git ne r/],
   ];
   for (const [ancre, fichier, remplacement, rouge] of mutations) {
     const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), motif);

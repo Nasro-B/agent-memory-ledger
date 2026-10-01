@@ -339,10 +339,39 @@ function surSessionStart(input) {
     REGLE_6BIS, core.commandes(SCRIPT, projet).lister)); // ancre-mutation:regle-6bis-session
 }
 
+// Réponses de l'utilisateur à un questionnaire (outil AskUserQuestion) : ce sont ses décisions, mais elles ne
+// passent pas par UserPromptSubmit. Sans ce relevé, une décision donnée par questionnaire n'était enregistrée
+// nulle part. Forme relevée dans les transcripts de Claude Code 2.1.284 :
+// tool_response { questions, answers: { "<question>": "<réponse>" ou [réponses] } }.
+function reponsesQuestionnaire(input) {
+  if (input.tool_name !== 'AskUserQuestion') return null;
+  let tr = input.tool_response;
+  if (typeof tr === 'string') { try { tr = JSON.parse(tr); } catch (_) { return null; } }
+  const a = tr && typeof tr === 'object' ? tr.answers : null;
+  if (!a || typeof a !== 'object') return null;
+  const lignes = Object.entries(a).map(([q, r]) => `« ${q} » : « ${Array.isArray(r) ? r.join(' ; ') : String(r)} »`);
+  return lignes.length ? `Réponses de l'utilisateur à un questionnaire :\n${lignes.join('\n')}` : null;
+}
+
 function surPostToolUse(input) {
   core.assurerVues(AGENT);
   let file = { ids: [], echecs: [], fins: [], projet: null };
   try { file = rattraperMessagesEnFile(input); } catch (_) { /* les preuves sont traitées quand même */ }
+  // Réponses à un questionnaire : enregistrées comme un message de l'utilisateur reçu pendant le tour.
+  const reponses = reponsesQuestionnaire(input);
+  if (reponses) {
+    let avant = null;
+    try { avant = core.lireSession(AGENT, input.session_id); } catch (_) { avant = null; }
+    try {
+      const r = enregistrerAvecReessai(input, reponses, 'questionnaire:' + (input.tool_use_id || empreinte(reponses))); // ancre-mutation:questionnaire
+      if (r && r.id && !r.doublon) {
+        file.ids.push(r.id);
+        file.messages = (file.messages || []).concat({ id: r.id, texte: reponses });
+        file.projet = r.projet;
+        rattacherAuTour(input, avant, r.id);
+      }
+    } catch (e) { file.echecs.push({ texte: reponses, erreur: e && e.message ? e.message : String(e) }); }
+  }
   // Sous-agent ou workflow lancé en arrière-plan : une ligne de travail le suit jusqu'à la preuve.
   let suivi = '';
   const lancee = tacheLancee(input);

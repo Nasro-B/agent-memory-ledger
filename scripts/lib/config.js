@@ -59,7 +59,7 @@ function tableProjets() {
   if (cacheTable && cacheTable.f === f && cacheTable.mtime === mtime) return cacheTable.liste;
   const liste = [];
   try {
-    const brut = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, ''));
+    const brut = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, ''));
     for (const p of (brut && Array.isArray(brut.projets) ? brut.projets : [])) {
       const nom = nomSur(p && p.nom);
       if (!nom || !p.motif) continue;

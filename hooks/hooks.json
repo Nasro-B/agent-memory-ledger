@@ -56,7 +56,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Workflow",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Workflow|AskUserQuestion",
         "hooks": [
           {
             "type": "command",
@@ -72,7 +72,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/commit.js\" --agent claude",
-            "timeout": 15,
+            "timeout": 25,
             "statusMessage": "Mémoire : journal du commit..."
           }
         ]

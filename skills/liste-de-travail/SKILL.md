@@ -34,4 +34,4 @@ Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemi
 
 ## Messages reçus pendant que tu travailles
 
-Ils sont enregistrés au prochain événement, et annoncés : « reçu(s) pendant ce tour ». Trie-les comme les autres. Si un message est signalé « NON enregistré », inscris-le toi-même mot pour mot avec `ajouter`.
+Ils sont enregistrés au prochain événement, et annoncés : « reçu(s) pendant ce tour ». Trie-les comme les autres. Les réponses de l'utilisateur à un questionnaire sont enregistrées de la même façon : ce sont ses décisions. Si un message est signalé « NON enregistré », inscris-le toi-même mot pour mot avec `ajouter`.

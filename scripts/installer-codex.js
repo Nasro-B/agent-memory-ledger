@@ -33,7 +33,7 @@ let brut = '';
 let existant = { hooks: {} };
 if (fs.existsSync(cible)) {
   brut = fs.readFileSync(cible, 'utf8');
-  try { existant = JSON.parse(brut.replace(/^﻿/, '')); } catch (e) {
+  try { existant = JSON.parse(brut.replace(/^\uFEFF/, '')); } catch (e) {
     process.stderr.write(`hooks.json illisible (${e.message}) : rien n'est modifié. Corrige le fichier ${cible} puis relance.\n`);
     process.exit(2);
   }

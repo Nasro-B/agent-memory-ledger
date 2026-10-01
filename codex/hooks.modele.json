@@ -76,7 +76,7 @@
           {
             "type": "command",
             "command": "node \"{{RACINE}}/scripts/memoire/commit.js\" --agent codex",
-            "timeout": 15,
+            "timeout": 25,
             "statusMessage": "Mémoire : journal du commit"
           },
           {

@@ -105,7 +105,7 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 | Début de session | réinjecte ce qui reste | règles du projet, résumé, journaux récents, alerte de travail non documenté |
 | Message de l'utilisateur | enregistre mot pour mot | |
 | Avant un outil | refuse l'écriture à la main dans la liste | |
-| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés | journalise les commits, compte les fichiers modifiés |
+| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) | journalise les commits, compte les fichiers modifiés |
 | Fin de tour | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités | point de contrôle toutes les deux heures |
 | Fin d'un sous-agent | marque son résultat « à traiter » | |
 | Avant compactage | | sauve l'état des dépôts |
@@ -118,16 +118,16 @@ Tout texte destiné au modèle tient sous 9 000 caractères. Ce qui ne tient pas
 
 Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 
-**Par bancs de tests** (sans modèle, payloads simulés) : 131 tests, tous verts.
+**Par bancs de tests** (sans modèle, payloads simulés) : 135 tests, tous verts.
 
 | Banc | Tests | Couvre |
 | --- | --- | --- |
-| `tests/context-ledger-claude.test.js` | 67 | noyau et adaptateur Claude Code |
+| `tests/context-ledger-claude.test.js` | 69 | noyau et adaptateur Claude Code |
 | `tests/context-ledger-codex.test.js` | 47 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
-| `tests/memoire.test.js` | 13 | hooks de mémoire, détection de projet, installateur Codex |
-| `tests/verifier-public.test.js` | 4 | contrôle avant publication |
+| `tests/memoire.test.js` | 14 | hooks de mémoire, détection de projet, installateur Codex |
+| `tests/verifier-public.test.js` | 5 | contrôle avant publication |
 
-Trente-cinq mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien.
+Trente-sept mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien.
 
 **En conditions réelles** :
 
@@ -156,7 +156,7 @@ node scripts/verifier-public.js
 node scripts/verifier-public.js --termes ~/mes-termes-prives.txt
 ```
 
-Le premier contrôle cherche les chemins de profil, les chemins absolus, les adresses et les clés. Le second ajoute votre liste de termes interdits (noms, projets, domaines), une expression par ligne, dans un fichier gardé hors du dépôt.
+Le premier contrôle cherche les chemins de profil, les chemins absolus, les adresses, les clés et les caractères invisibles. Le second ajoute votre liste de termes interdits (noms, projets, domaines), une expression par ligne, dans un fichier gardé hors du dépôt.
 
 ## Limites connues
 

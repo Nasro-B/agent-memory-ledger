@@ -62,6 +62,20 @@ test('profil personnel, chemin absolu, adresse, clés, clé privée et secret en
   assert.match(r.out, /3 fichier\(s\) contrôlé\(s\).* constat\(s\)\./);
 });
 
+test('caractère invisible écrit tel quel : signalé, sauf la marque d\'ordre des octets en tout début de fichier', () => {
+  const marque = String.fromCharCode(0xFEFF);
+  const largeurNulle = String.fromCharCode(0x200B);
+  const d = depot('invisibles', {
+    'debut.js': marque + "'use strict';\nconst a = 1;\n",
+    'milieu.js': "'use strict';\nconst t = texte.replace(/^" + marque + "/, '');\nconst b = 'a" + largeurNulle + "b';\n",
+  });
+  const r = controler(d);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /milieu\.js:2 : caractère invisible : U\+FEFF/);
+  assert.match(r.out, /milieu\.js:3 : caractère invisible : U\+200B/);
+  assert.ok(!/debut\.js/.test(r.out), 'une marque en tête de fichier est admise');
+});
+
 test('termes privés : chaque occurrence est une erreur, y compris dans un nom de fichier ; la liste doit rester hors du dépôt', () => {
   const d = depot('termes', { 'doc/projet-dupont.md': 'Fait pour la société Dupont.\nRien ici.\nDUPONT encore.\n', 'ok.md': 'rien\n' });
   const termes = path.join(RUN, 'termes-prives.txt');

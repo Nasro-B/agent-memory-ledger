@@ -8,7 +8,8 @@
 //   - chemins de profil d'une vraie personne (dossier Users d'un disque Windows, /home/<nom>, /Users/<nom>) ;
 //   - chemins Windows absolus hors des exemples admis (C:\travail, C:\outils, C:\tmp, C:\x, profil « demo ») ;
 //   - adresses électroniques (hors domaines d'exemple et adresses « noreply ») ;
-//   - clés et jetons aux formes connues, clés privées, affectations de mot de passe ou de secret en clair.
+//   - clés et jetons aux formes connues, clés privées, affectations de mot de passe ou de secret en clair ;
+//   - caractères invisibles écrits tels quels dans un fichier.
 // Contrôle supplémentaire : --termes <fichier> (ou la variable AML_TERMES_PRIVES) désigne un fichier GARDÉ HORS
 // DU DÉPÔT, une expression par ligne (sans tenir compte de la casse) : vos noms, vos projets, vos domaines.
 // Chaque occurrence est une erreur. Les lignes vides et celles qui commencent par # sont ignorées.
@@ -36,6 +37,9 @@ const REGLES = [
   { nom: 'clé ou jeton', re: /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|hf_[A-Za-z0-9]{25,})/g },
   { nom: 'clé privée', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
   { nom: 'secret en clair', re: /\b[A-Za-z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY)[A-Za-z0-9_]*\s*[:=]\s*["'][^"'\s$<{]{8,}["']/g },
+  // Caractères invisibles écrits tels quels (marque d'ordre des octets en milieu de fichier, espaces de largeur
+  // nulle) : ils changent le sens d'un code sans se voir. Une marque en tout début de fichier est admise.
+  { nom: 'caractère invisible', re: new RegExp('[' + [0xFEFF, 0x200B, 0x200C, 0x200D, 0x2060].map(c => String.fromCharCode(c)).join('') + ']', 'g'), garde: (m, ligne) => !(ligne === 0 && m.index === 0), montrer: m => 'U+' + m[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') },
 ];
 
 const termes = [];
@@ -75,7 +79,7 @@ for (const f of liste) {
     for (const r of REGLES) {
       r.re.lastIndex = 0;
       let m;
-      while ((m = r.re.exec(ligne))) if (!r.garde || r.garde(m)) constats.push(`${rel}:${i + 1} : ${r.nom} : ${extrait(m[0])}`);
+      while ((m = r.re.exec(ligne))) if (!r.garde || r.garde(m, i)) constats.push(`${rel}:${i + 1} : ${r.nom} : ${r.montrer ? r.montrer(m) : extrait(m[0])}`);
     }
     for (const t of termes) {
       t.lastIndex = 0;

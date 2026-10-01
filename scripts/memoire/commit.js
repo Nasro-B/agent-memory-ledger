@@ -17,6 +17,11 @@ const { resolveCommitTarget } = require('../lib/commande-git.js');
 const AGENT = config.agentDepuisArgs(process.argv);
 const DRY = process.argv.includes('--dry');
 const FRAICHEUR_S = 90;
+// Délai accordé à git pour lire HEAD. Sur une machine très chargée, git peut mettre plusieurs secondes à
+// répondre : avec un délai trop court, le commit n'était pas journalisé, en silence (cas mesuré à 2,5 s).
+// AML_DELAI_GIT_MS ne sert qu'aux bancs.
+const DELAI_GIT_MS = Number(process.env.AML_DELAI_GIT_MS) || 6000;
+const DELAI_DETAILS_MS = 3000;
 
 // Commandes shell d'un appel d'outil, avec leur dossier de travail. Claude Code : tool_input.command.
 // Codex : la forme varie (commande directe, tableau, code qui appelle exec_command) : même analyse que la garde.
@@ -48,12 +53,22 @@ memoire.avecEntree(input => {
 
     let racine = '', sha = '', sujet = '', date = NaN;
     try {
-      racine = memoire.git(['rev-parse', '--show-toplevel'], cible.gitCwd, 2500).trim();
-      const parts = memoire.git(['log', '-1', '--format=%ct%x00%h%x00%s'], cible.gitCwd, 2500).trim().split('\0');
+      racine = memoire.git(['rev-parse', '--show-toplevel'], cible.gitCwd, DELAI_GIT_MS).trim();
+      const parts = memoire.git(['log', '-1', '--format=%ct%x00%h%x00%s'], cible.gitCwd, DELAI_GIT_MS).trim().split('\0');
       date = Number(parts.shift());
       sha = (parts.shift() || '').trim();
-      sujet = parts.join('\0').replace(/﻿/g, '').trim();
-    } catch (_) { continue; }
+      sujet = parts.join('\0').replace(/\uFEFF/g, '').trim();
+    } catch (e) {
+      // git n'a pas répondu à temps : le dire au modèle, pour que le commit ne reste pas sans trace.
+      if (e && (e.code === 'ETIMEDOUT' || e.killed || e.signal)) { // ancre-mutation:commit-delai
+        const projet = config.detecterProjet(cible.gitCwd);
+        if (projet && !DRY) {
+          memoire.injecter(AGENT, 'PostToolUse', `Mémoire : ce commit n'a pas pu être journalisé (git n'a pas répondu en ${Math.round(DELAI_GIT_MS / 1000)} s). Écris toi-même son entrée dans ${memoire.fichierHistorique(projet, AGENT)} et sa ligne dans le résumé commun.`);
+          return;
+        }
+      }
+      continue;
+    }
     const age = Date.now() / 1000 - date;
     if (!Number.isFinite(date) || age > FRAICHEUR_S || age < -5 || !racine || !sha || !sujet) continue;
 
@@ -76,13 +91,13 @@ memoire.avecEntree(input => {
 
     const details = [];
     try {
-      const stat = memoire.git(['diff', '--stat', 'HEAD~1', 'HEAD'], cible.gitCwd, 2500).trim();
+      const stat = memoire.git(['diff', '--stat', 'HEAD~1', 'HEAD'], cible.gitCwd, DELAI_DETAILS_MS).trim();
       if (stat) {
         const lignes = stat.split('\n');
         for (const l of lignes.slice(0, -1).slice(0, 8)) details.push('- ' + l.trim());
         details.push('- ' + lignes[lignes.length - 1].trim());
       }
-      const corps = memoire.git(['log', '-1', '--format=%B'], cible.gitCwd, 2500).trim().split('\n').slice(2)
+      const corps = memoire.git(['log', '-1', '--format=%B'], cible.gitCwd, DELAI_DETAILS_MS).trim().split('\n').slice(2)
         .filter(l => l.trim() && !/^Co-Authored-By:/i.test(l)).slice(0, 4);
       for (const l of corps) details.push('- ' + l.trim());
     } catch (_) { /* premier commit du dépôt, ou git trop lent : l'entrée reste écrite */ }

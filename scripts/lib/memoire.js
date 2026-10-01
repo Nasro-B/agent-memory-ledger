@@ -169,7 +169,7 @@ function avecEntree(fn) {
   process.stdin.on('data', c => (data += c));
   process.stdin.on('end', () => {
     let input = {};
-    try { input = JSON.parse(data.replace(/^﻿/, '')); } catch (_) { input = {}; }
+    try { input = JSON.parse(data.replace(/^\uFEFF/, '')); } catch (_) { input = {}; }
     try { fn(input && typeof input === 'object' ? input : {}); } catch (e) {
       if (process.argv.includes('--dry')) { process.stderr.write('[dry] ERREUR : ' + (e && e.message) + '\n'); process.exitCode = 1; }
     }
