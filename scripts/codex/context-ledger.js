@@ -15,9 +15,12 @@
 //     le prochain UserPromptSubmit ou PostToolUse injecte la vue et efface le drapeau.
 //   SubagentStop : sortie vide (la fin du sous-agent est notée dans la liste de l'orchestrateur).
 //   Rien à dire : sortie vide.
-// Sous-agent : agent_id ou agent_type présent -> rien, sauf la garde PreToolUse, qui refuse, SubagentStart,
-// qui rappelle au sous-agent de ne pas toucher au fichier contexte et l'inscrit dans la liste de
-// l'orchestrateur, et SubagentStop, qui marque son résultat « à traiter » (voir « Livraisons »).
+// Sous-agent (agent_id ou agent_type présent) : jamais la liste ni les messages de l'orchestrateur.
+// SubagentStart l'inscrit dans la liste de l'orchestrateur, crée sa fiche et lui donne sa consigne ;
+// SubagentStop marque son résultat « à traiter » (voir « Livraisons ») ; ses autres événements lui rendent
+// sa fiche quand son contexte vient d'être compacté (PostCompact le note, l'outil suivant l'injecte).
+// La garde PreToolUse lui laisse la lecture de la liste et lui refuse toute écriture, sauf une note dans
+// sa propre fiche.
 // Toute erreur interne : silence et exit 0, sauf la garde PreToolUse qui refuse.
 //
 // Outils d'édition de Codex (apply_patch, exec_command, exec en code mode) : les preuves [ctx]
@@ -212,8 +215,9 @@ function gardeCodex(input) {
     const r = via('Bash', { command: c });
     if (r) return r;
     if (dossierRacine) {
-      if (sousAgent) return core.RAISON_SOUS_AGENT;
-      if (!core.commandeLectureOuCli(c)) return core.RAISON_SHELL;
+      // Dossier de travail placé dans la racine : lecture seulement (CLI restreinte pour un sous-agent).
+      if (sousAgent) { if (!core.commandeLectureOuCli(c, { agentId: String(base.agent_id) })) return core.RAISON_SOUS_AGENT; }
+      else if (!core.commandeLectureOuCli(c)) return core.RAISON_SHELL;
     }
   }
   if (a.reste) {
@@ -244,7 +248,7 @@ function fusionner(total, r, preuve) {
 }
 
 // Le TOUT PREMIER passage du réconciliateur lit tous les fichiers de preuve : sur une mémoire ancienne
-// (mesuré : 1 260 fichiers, 13 Mo, 23 s à froid) il dépasse le délai de 10 s d'un hook. Il est donc lancé dans
+// (mesuré : 1 260 fichiers, 13 Mo, 23 s à froid) il dépasse le délai d'un hook. Il est donc lancé dans
 // un processus détaché (base-en-cours) ; les hooks sautent la réconciliation tant que la base n'existe pas.
 // Les passages suivants ne relisent que les fichiers modifiés (~0,2 à 0,4 s mesurés).
 const BASE_EN_COURS_MS = 120000;
@@ -338,8 +342,14 @@ function prendreDrapeau(sessionId) {
 //  - la réponse finale d'un sous-agent arrive dans le rollout de l'orchestrateur en response_item
 //    { type: 'agent_message', author: '/root/<tâche>', recipient: '/root',
 //      content: [{ type: 'input_text', text: 'Message Type: FINAL_ANSWER\n...' }] }.
-// Non observé à ce jour : un payload réel de SubagentStart ou de SubagentStop (aucune session Codex
-// depuis le branchement) ; la lecture du rollout de l'orchestrateur sert de filet.
+// Observé dans des sessions réelles (2026-10-02, 2 579 événements) : les événements d'outils d'un sous-agent
+// portent agent_id, agent_type et, dans transcript_path, SON rollout ; SubagentStop porte le rollout de
+// l'orchestrateur dans transcript_path et celui du sous-agent dans agent_transcript_path ; PostCompact d'un
+// sous-agent porte son agent_id. Entrée de SubagentStart capturée le 2026-10-02 : agent_id, agent_type, cwd,
+// model, permission_mode, session_id, turn_id, et dans transcript_path le rollout du sous-agent ; sa consigne
+// s'écrit dans ce rollout en message « developer » (11 sous-agents sur 12 l'ont reçue ce soir-là, dont 2 par
+// le filet du premier outil ; le douzième, hook tué après sa marque, est le cas que le filet vérifie depuis).
+// La lecture du rollout de l'orchestrateur sert de filet pour les fins.
 
 // En-tête du rollout d'un sous-agent : chemin de tâche, surnom, profondeur.
 function enteteSousAgent(fichier) {
@@ -373,9 +383,61 @@ function suivreSousAgent(input, rollout) {
   });
 }
 
+// Fiche du sous-agent (noyau : creerFiche). Dans Codex 0.155 le message de lancement est chiffré, dans le
+// rollout comme dans l'entrée des hooks (mesuré le 2026-10-02 : tool_input.message commence par « gAAAA ») :
+// la mission ne peut pas être copiée par le hook, le sous-agent la recopie lui-même dans sa fiche.
+// Sous-agent d'un sous-agent (profondeur > 1) : pas de ligne dans la liste, mais une fiche quand même.
+function assurerFiche(input, rollout) {
+  const id = String(input.agent_id);
+  let index = core.lireIndexFiche(AGENT, id);
+  if (index) return index;
+  const e = enteteSousAgent(rollout);
+  const nom = e.chemin ? String(e.chemin).replace(/^\/root\//, '') : '';
+  let suivi = null;
+  try { const s = core.lireSession(AGENT, input.session_id); suivi = s && s.taches ? s.taches[id] : null; } catch (_) { suivi = null; }
+  // Titre de repli quand ni le suivi ni le rollout n'en donnent : remplacé dès que le vrai titre arrive.
+  const titre = (suivi && suivi.titre) || (nom ? `${nom}${e.surnom ? ` (${e.surnom})` : ''}` : '');
+  core.creerFiche({
+    agent: AGENT, sessionId: input.session_id, id, cwd: input.cwd, ligne: suivi ? suivi.ligne : null,
+    projet: (suivi && suivi.projet) || core.projetDeSession(AGENT, input.session_id, input.cwd),
+    titre: titre || `sous-agent ${input.agent_type || ''}`.trim(), titreRepli: !titre,
+    genre: String(input.agent_type || 'agent'),
+  });
+  return core.lireIndexFiche(AGENT, id);
+}
+
 function surSubagentStart(input) {
   try { suivreSousAgent(input, input.transcript_path); } catch (_) { /* le sous-agent démarre quand même */ }
-  contexte('SubagentStart', core.RAISON_SOUS_AGENT);
+  if (input.agent_id) { try { assurerFiche(input, input.transcript_path); } catch (_) { /* consigne sans fiche */ } }
+  contexte('SubagentStart', core.texteConsigneSousAgent({ agent: AGENT, id: input.agent_id, script: SCRIPT }));
+  if (input.agent_id) { try { core.consigneADonner({ agent: AGENT, id: String(input.agent_id) }); } catch (_) { /* au pire, redite à son premier outil */ } }
+}
+
+// Événement venu d'un sous-agent (agent_id présent ; transcript_path = SON rollout, mesuré le 2026-10-02).
+// Jamais la liste de l'orchestrateur : sa fiche, rendue quand son contexte vient d'être compacté.
+function surEvenementSousAgent(input) {
+  const evenement = input.hook_event_name;
+  if (!input.agent_id || !['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'PostCompact'].includes(evenement)) return;
+  const id = String(input.agent_id);
+  let index = null;
+  try { index = assurerFiche(input, input.transcript_path); } catch (_) { index = null; }
+  if (!index) return;
+  // PostCompact porte l'identité du sous-agent (mesuré : 7 événements réels le 2026-10-02) mais ne peut rien
+  // injecter : le compactage est noté, la fiche sera rendue à son prochain outil.
+  if (evenement === 'PostCompact') { core.noterCompactage({ agent: AGENT, id }); return; }
+  let compacte = false;
+  try {
+    compacte = core.compactageDuSousAgent({
+      agent: AGENT, id, fichier: input.transcript_path, motifs: ['"type":"compacted"'],
+      annonce: evenement === 'SessionStart' && input.source === 'compact',
+    });
+  } catch (_) { compacte = false; }
+  if (compacte) { contexte(evenement, plafonner(core.texteRepriseSousAgent({ agent: AGENT, id, script: SCRIPT }))); return; } // ancre-mutation:reprise-sous-agent
+  // Consigne jamais donnée (mesuré le 2026-10-02 : celle du démarrage n'est arrivée qu'à 2 sous-agents sur 22,
+  // hook de démarrage tué par son délai ou jamais déclenché), ou marquée mais absente de son rollout (hook de
+  // démarrage tué après sa marque, constaté le 2026-10-02) : donnée ici, une fois. La consigne injectée
+  // s'écrit dans le rollout en message « developer ».
+  if (!index.reprises && !index.consigneVerifieeLe && core.consigneADonner({ agent: AGENT, id, fichier: input.transcript_path, formes: ['"role":"developer"'] })) contexte(evenement, core.texteConsigneSousAgent({ agent: AGENT, id, script: SCRIPT })); // ancre-mutation:consigne-filet
 }
 
 // Fin d'un tour du sous-agent : son résultat devient « à traiter » dans la liste de l'orchestrateur.
@@ -399,7 +461,7 @@ function finDansLigne(ligne) {
 }
 
 // Ce que l'orchestrateur doit lire avant la fin du tour : fins pas encore annoncées (SubagentStop marque une
-// fin sans rien lui dire) et rappel des résultats qui attendent. Le Stop bloquant reste le canal prouvé.
+// fin sans rien lui dire) et rappel des résultats qui attendent. Le Stop bloquant reste le filet de fin de tour.
 function suiviEnCours(input) {
   try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
 }
@@ -446,7 +508,7 @@ function surSessionStart(input) {
 
 // ---------------------------------------------------------------------------
 // Garantie mécanique : un message de l'utilisateur n'est jamais perdu, même si les verrous restent occupés
-// (plusieurs hooks et sessions en parallèle). Réessais jusqu'à ~6 s (timeout du hook : 10 s), puis
+// (plusieurs hooks et sessions en parallèle). Réessais jusqu'à ~6 s (délai du hook : 15 s), puis
 // dépôt dans .sessions\en-attente-<agent>.jsonl, repris au prochain événement.
 
 const DELAI_MESSAGE_MS = 6000;
@@ -607,8 +669,9 @@ function surPostCompact(input) {
   poserDrapeau(input.session_id); // PostCompact ne peut pas injecter (schéma) : sortie vide
 }
 
-// Codex : le Stop {decision:block} est le canal le plus sûr vers le modèle (l'additionalContext d'un
-// PostToolUse n'a pas été observé dans un rollout). Il porte donc, une fois par message humain :
+// Codex : le Stop {decision:block} fait continuer le tour, ce qu'un texte ajouté après un outil ne fait pas
+// (l'additionalContext d'un PostToolUse arrive bien au modèle, en message « developer » : observé dans des
+// rollouts réels le 2026-10-02). Il porte donc, une fois par message humain :
 //  - le rappel du noyau (M du tour à trier, lignes du tour ni faites ni citées) ;
 //  - sinon, les M de CETTE session encore à trier (ex. un premier message suivi d'un second dans le même
 //    tour : le noyau ne suit que le dernier) ;
@@ -636,14 +699,20 @@ function rappelSession(input, s, projet, cmd) {
 
 function surStop(input) {
   if (input.stop_hook_active) return;
-  try { reprendreEnAttente(); } catch (_) { /* rien */ }
-  try { rattraperFins(input); } catch (_) { /* une fin non lue ici le sera au prochain événement */ }
-  try { reconcilier(); } catch (_) { /* rien */ }
-  core.assurerVues(AGENT);
-  let texte = core.rappelStop({
-    agent: AGENT, sessionId: input.session_id, promptId: input.turn_id,
-    dernierMessage: input.last_assistant_message, script: SCRIPT,
-  });
+  // Le rappel passe avant tout : les mises à jour qui le précèdent ne tournent que s'il reste du temps
+  // (ce qu'elles auraient vu le sera au prochain événement). Un hook tué pour délai dépassé ne rappelle rien.
+  const sIlResteDuTemps = fn => { if (core.tempsRestant() > 2500) { try { fn(); } catch (_) { /* au prochain événement */ } } }; // ancre-mutation:stop-budget
+  sIlResteDuTemps(reprendreEnAttente);
+  sIlResteDuTemps(() => rattraperFins(input));
+  sIlResteDuTemps(reconcilier);
+  try { core.assurerVues(AGENT); } catch (_) { /* la vue sera refaite au prochain événement */ }
+  let texte = '';
+  try {
+    texte = core.rappelStop({
+      agent: AGENT, sessionId: input.session_id, promptId: input.turn_id,
+      dernierMessage: input.last_assistant_message, script: SCRIPT,
+    });
+  } catch (_) { texte = ''; } // verrou occupé jusqu'à l'échéance : les livraisons sont rappelées quand même
   const s = core.lireSession(AGENT, input.session_id);
   if (!s || !s.projet) return;
   const projet = s.projet;
@@ -664,7 +733,12 @@ function executerHook(brut) {
     return;
   }
   if (!input || typeof input !== 'object') return;
+  try { core.capturerEvenement({ agent: AGENT, input, octets: String(brut).length }); } catch (_) { /* diagnostic seulement */ }
   const evenement = input.hook_event_name;
+  // Budget de temps, démarrage de node compris : sous le délai du modèle de hooks (20 s pour la garde, la fin
+  // de tour, le démarrage et la fin d'un sous-agent et l'après-compactage ; 15 s sinon).
+  // Un hook tué pour délai dépassé ne rend rien : constaté dans une session réelle sur le rappel de fin de tour.
+  core.fixerBudget({ PreToolUse: 16000, Stop: 16000, SubagentStop: 16000, PostCompact: 16000, SubagentStart: 16000 }[evenement] || 12000);
   if (evenement === 'PreToolUse') {
     try {
       const raison = gardeCodex(input); // ancre-mutation:garde-codex
@@ -677,7 +751,8 @@ function executerHook(brut) {
   if (!AGENT) return;
   if (evenement === 'SubagentStart') { try { surSubagentStart(input); } catch (_) { /* silence */ } return; }
   if (evenement === 'SubagentStop') { try { surSubagentStop(input); } catch (_) { /* le rollout de l'orchestrateur sert de filet */ } return; }
-  if (input.agent_id || input.agent_type) return; // sous-agent : rien
+  // Sous-agent : jamais la liste ni les messages de l'orchestrateur, seulement sa propre fiche.
+  if (input.agent_id || input.agent_type) { try { surEvenementSousAgent(input); } catch (_) { /* silence */ } return; }
   try {
     if (evenement === 'UserPromptSubmit') surUserPromptSubmit(input);
     else if (evenement === 'SessionStart') surSessionStart(input);

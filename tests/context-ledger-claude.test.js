@@ -54,7 +54,9 @@ function dossier(nom) {
 }
 
 function envPour(dir) {
-  const env = Object.assign({}, process.env, { AGENT_MEMORY_LEDGER_HOME: path.dirname(dir) });
+  // CONTEXT_LEDGER_BUDGET_MS : les bancs saturent eux-mêmes la machine (un processus par hook) ; le budget
+  // de temps réel d'un hook n'est mesuré que par le test qui lui est dédié.
+  const env = Object.assign({ CONTEXT_LEDGER_BUDGET_MS: '600000' }, process.env, { AGENT_MEMORY_LEDGER_HOME: path.dirname(dir) });
   delete env.CONTEXT_LEDGER_DIR;
   delete env.CONTEXT_LEDGER_HOOK;
   delete env.CONTEXT_LEDGER_EN_MUTATION;
@@ -163,6 +165,9 @@ test('message humain : M créé mot pour mot', () => {
   const ctx = contexte(r);
   assert.equal(r.json.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
   assert.match(ctx, /Nouveau message M-0001\. Avant d'agir/);
+  // Un sous-agent peut lire ce texte sans en être le destinataire (chez Codex il démarre avec une copie de
+  // la conversation du parent) : la deuxième ligne dit à qui il s'adresse.
+  assert.match(ctx, /^Fichier contexte \(projet projet-demo, agent claude\) : .+\nPour l'orchestrateur seulement \(un sous-agent qui lit ceci s'en tient à sa mission\)\.\n/);
   assert.ok(ctx.includes(`ajouter --projet ${PROJET} --de M-0001 "texte mot pour mot"`));
   assert.ok(ctx.includes(`sans-travail --projet ${PROJET} M-0001 "raison courte"`));
   assert.ok(ctx.includes('[ctx C-NNNN partiel]'));
@@ -202,16 +207,21 @@ test('task-notification ignorée', () => {
   assert.ok(!fs.existsSync(path.join(dir, '.etat')));
 });
 
-test('sous-agent (agent_id) ignoré sur UserPromptSubmit, PostToolUse, SessionStart et Stop', () => {
+test('sous-agent (agent_id) : son message n\'est pas un message de l\'utilisateur, sa preuve ne ferme rien, il ne reçoit jamais la liste', () => {
   const dir = dossier('sous-agent');
+  // Son démarrage n'a pas été vu : son premier événement lui donne sa consigne (une fois), jamais la liste.
+  const consigne = /^Fichier contexte : tu es un sous-agent\. Ta fiche : /;
   const r = ups(dir, 'message de sous-agent', { agent_id: 'a123' });
-  assert.equal(r.out, '');
-  assert.ok(!fs.existsSync(path.join(dir, '.etat')));
+  assert.match(contexte(r), consigne);
+  assert.ok(!/Nouveau message M-|À trier :|Ouvert :/.test(contexte(r)), 'ni message enregistré, ni liste');
+  assert.ok(!fs.existsSync(path.join(dir, '.etat')), 'aucun message enregistré');
   const id = preparerLigne(dir);
   const p = postWrite(dir, histoire(dir), `- fini [ctx ${id}]\n`, { agent_id: 'a123' });
   assert.equal(p.out, '');
   assert.equal(etat(dir).lignes[id].statut, 'ouvert');
-  assert.equal(hook(dir, { hook_event_name: 'SessionStart', session_id: 's-x', cwd: CWD_PROJET, source: 'startup', agent_id: 'a1' }).out, '');
+  const debut = contexte(hook(dir, { hook_event_name: 'SessionStart', session_id: 's-x', cwd: CWD_PROJET, source: 'startup', agent_id: 'a1' }));
+  assert.match(debut, consigne);
+  assert.ok(!/Ouvert :|bouton de paiement/.test(debut), 'jamais la liste de l\'orchestrateur');
   assert.equal(hook(dir, { hook_event_name: 'Stop', session_id: 'sess-1', prompt_id: 'p-1', agent_id: 'a1', stop_hook_active: false }).out, '');
 });
 
@@ -473,17 +483,125 @@ test('garde : Bash cat sur la racine autorisé (lecture et CLI)', () => {
   }
 });
 
-test('garde : sous-agent qui appelle la CLI ou touche la racine refusé', () => {
+// Règle : un sous-agent n'ÉCRIT jamais dans la liste de travail. La garde lui refusait aussi la lecture :
+// mesuré dans des sessions réelles, 19 refus dans 7 sous-agents Codex et le même refus dans 23 sous-agents
+// Claude Code, tous pour lire la liste ou le texte intégral d'une ligne. Commandes ci-dessous : formes
+// relevées dans ces sessions.
+test('garde : sous-agent : écriture et commandes d\'écriture de la CLI refusées, lecture de la racine permise', () => {
   const dir = dossier('garde-sous-agent');
-  const cmdCli = 'node "C:/outils/agent-memory-ledger/scripts/claude/context-ledger.js" ajouter --projet x "y"';
-  const r = preTool(dir, 'Bash', { command: cmdCli }, { agent_id: 'a42' });
+  const sa = { agent_id: 'a42' };
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const S = 'node "C:/outils/agent-memory-ledger/scripts/claude/context-ledger.js"';
+  const cmdCli = `${S} ajouter --projet x "y"`;
+  const r = preTool(dir, 'Bash', { command: cmdCli }, sa);
   assert.ok(estRefuse(r), r.out);
-  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /orchestrateur/);
-  assert.ok(estRefuse(preTool(dir, 'Bash', { command: 'cat ~/.agent-memory-ledger/contexte/x.md' }, { agent_id: 'a42' })));
-  assert.ok(estRefuse(preTool(dir, 'Write', { file_path: 'C:\\Users\\demo\\.agent-memory-ledger\\contexte\\x.md', content: '' }, { agent_id: 'a42' })));
-  assert.equal(preTool(dir, 'Bash', { command: 'npm test' }, { agent_id: 'a42' }).out, '');
-  // Sans agent_id, la même CLI passe.
+  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /^Seul l'orchestrateur écrit dans le fichier contexte\. Toi, sous-agent, tu peux le LIRE/);
+  // Écritures : toujours refusées, quelle que soit la forme.
+  for (const cmd of [
+    `Set-Content -LiteralPath '${R}\\projet-demo.claude.md' -Value x`,
+    `echo x > '${R}\\projet-demo.claude.md'`,
+    `rm '${R}\\projet-demo.claude.md'`,
+    `$p='${R}\\x.md'; Remove-Item $p`,
+    `Get-Content '${R}\\x.md' | Out-File '${R}\\y.md'`,
+    `rg --pre cmd.exe x '${R}'`,
+    `Get-ChildItem '${R}' | ForEach-Object { Remove-Item $_ }`,
+    `Get-ChildItem '${R}' | ForEach-Object Delete`,
+    `Get-ChildItem '${R}' | ForEach-Object { $_.Delete() }`,
+    `Get-Content '${R}\\x.md' | ForEach-Object { $_.Line } | Set-Content '${R}\\y.md'`,
+    `${S} etat --projet x C-0001 ouvert`,
+    `${S} sans-travail --projet x M-0001 "raison"`,
+    `${S} abandon --projet x C-0001 "citation"`,
+    `git status; ${S} ajouter --projet x "y"`,
+    `cat ~/.agent-memory-ledger/contexte/x.md; ${S} ajouter --projet x "y"`,
+    `${S} note --fiche a99 "note dans la fiche d'un autre"`,
+    `${S} note "note sans fiche"`,
+  ]) assert.ok(estRefuse(preTool(dir, 'Bash', { command: cmd }, sa)), `devait refuser : ${cmd}`);
+  assert.ok(estRefuse(preTool(dir, 'Write', { file_path: `${R}\\x.md`, content: '' }, sa)));
+  assert.ok(estRefuse(preTool(dir, 'Edit', { file_path: `${R}\\projet-demo.claude\\fiches\\a.md`, old_string: 'a', new_string: 'b' }, sa)), 'une fiche ne se modifie que par la commande note');
+  // Lectures : permises (c'est ce que la garde refusait à tort).
+  for (const cmd of [
+    'cat ~/.agent-memory-ledger/contexte/x.md',
+    `Get-Content -LiteralPath '${R}\\projet-demo.claude.md' -TotalCount 4`,
+    `$p='${R}\\projet-demo.claude.md'; Get-Content -LiteralPath $p -TotalCount 4`,
+    `$root='${R}\\projet-demo.claude.md'; Select-String -LiteralPath $root -Pattern 'LGPL|fpdf2' | Select-Object -First 50`,
+    `rg -n -i -l --glob 'C-*.txt' 'domain_tlds' '${R}\\projet-demo.claude'`,
+    `Get-Content -LiteralPath '${R}\\projet-demo.claude\\C-0297.txt'`,
+    `Get-Item -LiteralPath 'D:\\x\\a.md' | Select-Object FullName,Length; Get-ChildItem -LiteralPath '${R}' -Force | Select-Object -First 8 Name,Mode`,
+    `cat "C:/Users/demo/.agent-memory-ledger/contexte/x.md" | grep -i sms | head -20`,
+    `Get-Content -LiteralPath '${R}\\projet-demo.claude.md' | Select-String 'C-0461' | ForEach-Object { $_.Line }`,
+    `Get-Content -LiteralPath '${R}\\projet-demo.claude.md' | Select-String -Pattern 'C-0180' | % { $_.LineNumber }`,
+    `${S} lister --projet x`,
+    `${S} chercher --projet x "domain_tlds" "LGPL"`,
+    `${S} fiche a42`,
+    `${S} note --fiche a42 "fait : lots B01 à B05 lus"`,
+    `git status; ${S} lister`,
+    'npm test',
+  ]) assert.equal(preTool(dir, 'Bash', { command: cmd }, sa).out, '', `devait permettre : ${cmd}`);
+  // Sans agent_id, la CLI d'écriture passe (l'orchestrateur).
   assert.equal(preTool(dir, 'Bash', { command: cmdCli }).out, '');
+});
+
+// Le 2026-10-02, 91 lectures restaient refusées à 12 sous-agents Codex (rejouées une à une dans la
+// garde). Formes sans effet permises depuis ; celles qui peuvent exécuter autre chose restent refusées.
+// Commandes ci-dessous : formes réelles, ou leur variante dangereuse.
+test('garde : sous-agent : sous-expressions de lecture, blocs sans effet, Where-Object et help permis ; méthodes, appels et variables après un | refusés', () => {
+  const dir = dossier('garde-sous-agent-formes');
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const F = `${R}\\_general.codex\\fiches\\default-c336a1a71d78.md`;
+  const S = 'node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js"';
+  const garde = command => avecRacine(dir, () => core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'Bash', tool_input: { command }, cwd: CWD_PROJET } }));
+  for (const cmd of [
+    `$p='${F}'; (Get-Content -LiteralPath $p).Count; Get-Content -LiteralPath $p -Raw`,
+    `(Get-Content -LiteralPath '${F}' | Measure-Object -Line).Lines`,
+    `(Get-Content -LiteralPath '${R}\\projet-demo.claude.md' | Select-String -SimpleMatch 'B07-AI-12').Line`,
+    `(Get-Content -LiteralPath '${F}')[0]`,
+    `Get-Item -LiteralPath (Join-Path '${R}' 'projet-demo.claude.md') | Select-Object FullName,Length,LastWriteTime`,
+    `Select-String -LiteralPath '${R}\\projet-demo.claude.md' -Pattern 'C-0130' | ForEach-Object { '{0}: {1}' -f $_.LineNumber,$_.Line }`,
+    `Get-Content -LiteralPath '${F}' -ReadCount 0 | ForEach-Object { $_ }`,
+    `Get-ChildItem -LiteralPath '${R}\\projet-demo.claude' -Name | Where-Object { $_ -match '^C-04' } | Sort-Object`,
+    `Get-ChildItem -LiteralPath '${R}' -Directory | Where-Object Name -like '*projet*' | Select-Object -ExpandProperty FullName`,
+    `Format-Hex -LiteralPath '${R}\\projet-demo.claude\\C-0121.txt' | Select-Object -First 8`,
+    `Get-Content -LiteralPath '${F}' -Raw; Get-Location`,
+    `& 'C:\\Program Files\\Git\\usr\\bin\\wc.exe' -l '${R}\\projet-demo.claude.md'`,
+    `Get-Content '${R}\\x.md' | Select-Object -First 5 2>$null`,
+    // Caractère hors du plan de base : les segments restent alignés sur la commande.
+    `cat '${R}\\${String.fromCodePoint(0x1F600)} x.md' | grep -i sms`,
+    `${S} help`,
+  ]) assert.equal(garde(cmd), null, `devait permettre : ${cmd}`);
+  for (const cmd of [
+    `(Get-Item '${R}\\x.md').Delete()`,
+    `Get-Item -LiteralPath $f.MoveTo(Join-Path '${R}' 'y.md')`,
+    `& (Get-Content '${R}\\x.md')`,
+    `&(Get-Content '${R}\\x.md')`,
+    `. (Get-Content '${R}\\x.md')`,
+    `(Remove-Item '${R}\\x.md')`,
+    `Test-Path ([IO.File]::Delete('${R}\\x.md'))`,
+    `Get-ChildItem '${R}' | Where-Object { Remove-Item $_ }`,
+    `Get-ChildItem '${R}' | Where-Object $sb`,
+    `Get-ChildItem '${R}' | Sort-Object $sb`,
+    `Get-ChildItem '${R}' | Get-Content -Path $sb`,
+    `Get-ChildItem '${R}' | Select-Object -Property (Get-Content variable:sb)`,
+    `Sort-Object -InputObject (Get-ChildItem '${R}') -Property $sb`,
+    `Get-Content '${R}\\x.md' | ForEach-Object { '{0}' -f (Remove-Item x) }`,
+    `Get-Content '${R}\\x.md' | % { $_.Delete() }`,
+    `foreach($i in 1,2){ Get-Content '${R}\\x.md' }`,
+    `$x = Get-Content '${R}\\x.md'`,
+    `'${R}\\x.md'`,
+    `"cat x" '${R}\\x.md'`,
+    `& 'C:\\Program Files\\x\\rm.exe' '${R}\\x.md'`,
+    `(Get-Content '${R}\\x.md') > y.txt`,
+    `cat '${R}\\x.md' ${String.fromCharCode(1)}`,
+  ]) assert.ok(garde(cmd), `devait refuser : ${cmd}`);
+  // Bout en bout : l'aide se lit, et le refus dit comment lire sans boucle.
+  assert.equal(preTool(dir, 'Bash', { command: `${S} help` }, { agent_id: 'a42' }).out, '');
+  const r = preTool(dir, 'Bash', { command: `foreach($i in 1,2){ Get-Content '${R}\\x.md' }` }, { agent_id: 'a42' });
+  assert.ok(estRefuse(r), r.out);
+  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /une par lecture, sans boucle ni script/);
+  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /chercher C-0151 C-0152 rend ces lignes entières ; --agent claude ou --agent codex pour la liste d'un autre agent/);
+  const h = cli(dir, ['help']);
+  assert.equal(h.code, 0, h.err);
+  assert.match(h.out, /^Usage : node context-ledger\.js <commande>/);
+  assert.match(h.out, /un identifiant \(chercher C-0151 C-0152 M-0042\) rend la ligne ou le message entier/);
 });
 
 // Règle : la citation doit venir d'un message écrit APRÈS la création de la ligne.
@@ -948,8 +1066,14 @@ test('mutation : règle 6 bis retirée du message ou du démarrage -> banc rouge
   assert.match(r2.stdout, /not ok \d+ - r.gle des d.couvertes en route/);
 });
 
-// Verrou tenu par un autre processus pendant ~4,5 s (plus que les 3 s d'attente du noyau) : sans réessai,
+// Verrou tenu par un autre processus pendant 5,5 s (plus que les 3 s d'attente du noyau) : sans réessai,
 // la commande échoue « verrou occupé » ; avec réessai, elle aboutit dès que le verrou se libère.
+// Deux bornes, d étant le temps de démarrage du processus. Sans réessai, l'échec demande d + 3 s < durée du
+// verrou. Avec réessai, le message abandonne vers d + 6,1 s (DELAI_MESSAGE_MS = 6 s) : la durée doit rester
+// sous 6 s. Mesuré dans les bancs complets du 2026-10-02 : à 4,5 s (1,5 s de marge de démarrage), machine
+// chargée, la mutation « réessai du message désactivé » restait verte ; à 6,5 s, le test non muté échouait
+// dès que le processus démarrait en moins de 0,4 s. À 5,5 s : 2,5 s de marge pour la mutation, et au moins
+// 0,6 s pour le test non muté.
 function verrouTenu(dir, ms) {
   const verrou = path.join(dir, '.etat', `${PROJET}.claude.json.lock`);
   fs.writeFileSync(verrou, '99999 autre session');
@@ -961,11 +1085,11 @@ function verrouTenu(dir, ms) {
 test('verrou occupé plus de 3 s : la CLI et le message réessaient au lieu d\'échouer', () => {
   const dir = dossier('reessai-verrou');
   ups(dir, 'premier');
-  verrouTenu(dir, 4500);
+  verrouTenu(dir, 5500);
   const a = cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0001', 'Ligne sous charge']);
   assert.equal(a.code, 0, 'la CLI doit réessayer : ' + a.err);
   assert.equal(etat(dir).lignes['C-0001'].texte, 'Ligne sous charge');
-  verrouTenu(dir, 4500);
+  verrouTenu(dir, 5500);
   const r = ups(dir, 'Message envoyé pendant que le verrou est tenu', { prompt_id: 'p-2' });
   const ctx = contexte(r);
   assert.match(ctx, /Nouveau message M-0002\. Avant d'agir/);
@@ -1446,8 +1570,12 @@ test('livraisons : notification en tour séparé, workflow, agent tué, agent in
   // Agent inconnu (lancé avant l'activation, ou agent interne d'un workflow) : ignoré, aucune ligne.
   assert.equal(hook(dir, { hook_event_name: 'SubagentStop', session_id: 'sess-1', agent_id: 'a9999999999999999', agent_type: 'x', stop_hook_active: false }).out, '');
   assert.equal(ups(dir, notificationFin('a8888888888888888'), { prompt_id: 'p-n3' }).out, '');
-  // Lancement fait PAR un sous-agent (agent_id présent) : ignoré, seul l'orchestrateur tient la liste.
-  assert.equal(lancementAgent(dir, 'a7777777777777777', 'imbriqué', { agent_id: 'a3333333333333333' }).out, '');
+  // Lancement fait PAR un sous-agent (agent_id présent) : ignoré, seul l'orchestrateur tient la liste. Ce
+  // sous-agent, dont le démarrage n'a pas été vu, reçoit à ce premier événement sa consigne, et rien d'autre.
+  const imbrique = lancementAgent(dir, 'a7777777777777777', 'imbriqué', { agent_id: 'a3333333333333333' });
+  assert.match(contexte(imbrique), /^Fichier contexte : tu es un sous-agent \(ligne C-0001 de l'orchestrateur\)\. Ta fiche : /);
+  assert.ok(!/suivi par C-/.test(contexte(imbrique)), 'aucune ligne pour le sous-agent d\'un sous-agent');
+  assert.equal(lancementAgent(dir, 'a7777777777777778', 'imbriqué 2', { agent_id: 'a3333333333333333' }).out, '');
   assert.deepEqual(Object.keys(etat(dir).lignes), ['C-0001', 'C-0002']);
 });
 
@@ -1560,6 +1688,475 @@ test('fin de tour : le rappel vaut annonce, la fin n\'est pas redite à l\'outil
 // Réponses à un questionnaire (outil AskUserQuestion) : une décision donnée par questionnaire doit être
 // enregistrée comme un message. Forme du payload : relevée dans les transcripts de Claude Code.
 
+// Fiches des sous-agents (un second fichier de contexte, propre à chaque
+// sous-agent et signé par son ID de travail). Mesuré la même nuit dans 372 transcripts : 51 sous-agents
+// Claude compactés (81 compactages), et après son compactage un sous-agent recevait la liste de
+// l'orchestrateur à la place de sa mission (18 fois).
+// Formes relevées (Claude Code 2.1.284) : transcript d'un sous-agent =
+// <dossier>/<session>/subagents/agent-<id>.jsonl, première ligne = son brief ; compactage = ligne
+// { type: 'system', subtype: 'compact_boundary' }, écrite APRÈS les hooks SessionStart du compactage.
+
+const SESSION_FICHE = '11111111-2222-3333-4444-555555555555';
+
+function scene(nom) {
+  const dir = dossier(nom);
+  const projets = path.join(RUN, nom + '-projets');
+  fs.rmSync(projets, { recursive: true, force: true });
+  fs.mkdirSync(path.join(projets, SESSION_FICHE, 'subagents'), { recursive: true });
+  const t = path.join(projets, SESSION_FICHE + '.jsonl');
+  fs.writeFileSync(t, JSON.stringify({ type: 'user', message: { role: 'user', content: 'début' } }) + '\n');
+  return {
+    dir, t,
+    tSA: id => path.join(projets, SESSION_FICHE, 'subagents', `agent-${id}.jsonl`),
+    base: { session_id: SESSION_FICHE, cwd: CWD_PROJET, transcript_path: t },
+  };
+}
+const briefDe = (id, mission) => JSON.stringify({ type: 'user', isSidechain: true, agentId: id, message: { role: 'user', content: mission } }) + '\n';
+const COMPACTAGE = JSON.stringify({ type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'auto' } }) + '\n';
+// Ce que Claude Code écrit dans le transcript quand le texte d'un hook parvient au modèle (forme relevée le
+// 2026-10-03 : 52 lignes dans une session réelle, SubagentStart et PostToolUse compris).
+const injectee = (texte, evenement = 'SubagentStart') => JSON.stringify({ type: 'attachment', attachment: { type: 'hook_additional_context', content: [texte], hookName: evenement, hookEvent: evenement } }) + '\n';
+const indexFiche = (dir, id) => JSON.parse(fs.readFileSync(path.join(dir, '.fiches', `claude-${id}.json`), 'utf8'));
+
+test('fiche de sous-agent : mission copiée mot pour mot au lancement, notes du sous-agent, fiche rendue après SON compactage', () => {
+  const { dir, tSA, base } = scene('fiche');
+  const ID = 'a1b2c3d4e5f6a7b8c';
+  const MISSION = 'MISSION : vérifier les lots B01 à B05.\nPrix « $1 » et motif $& à garder tels quels.\nRends un tableau des restes.';
+  hook(dir, Object.assign({ hook_event_name: 'UserPromptSubmit', prompt_id: 'p-1', prompt: 'Lance un agent de vérification' }, base));
+  cli(dir, ['sans-travail', '--projet', PROJET, 'M-0001', 'suivi par la ligne de l\'agent']);
+  const lancement = hook(dir, Object.assign({
+    hook_event_name: 'PostToolUse', prompt_id: 'p-1', tool_name: 'Agent',
+    tool_input: { description: 'Vérification des lots B01 à B05', subagent_type: 'general-purpose', prompt: MISSION, run_in_background: true },
+    tool_response: { isAsync: true, status: 'async_launched', agentId: ID, outputFile: `C:\\tmp\\tasks\\${ID}.output` },
+  }, base));
+  assert.match(contexte(lancement), /suivi par C-0001\./);
+  const index = indexFiche(dir, ID);
+  assert.equal(index.ligne, 'C-0001');
+  assert.equal(index.mission, true);
+  assert.equal(index.projet, PROJET);
+  assert.equal(index.session, SESSION_FICHE);
+  const fiche = () => fs.readFileSync(index.fiche, 'utf8');
+  assert.ok(fiche().includes(`## Mission (mot pour mot)\n\n${MISSION}\n`), 'mission mot pour mot, caractères $ compris');
+  assert.ok(fiche().includes(`- ID de travail : ${ID} (general-purpose)`));
+  assert.ok(fiche().includes(`- Orchestrateur : claude, session ${SESSION_FICHE}, projet ${PROJET}`));
+  assert.ok(fiche().includes('- Ligne de suivi dans la liste de l\'orchestrateur : C-0001 (lecture seule pour le sous-agent)'));
+  // « Fiche créée le » : la fiche peut naître en cours de route, pas forcément au lancement.
+  assert.match(fiche(), /\n- Fiche créée le \d{4}-\d\d-\d\d \d\d:\d\d/);
+  assert.equal(fiche().split('\n')[0], '# Fiche du sous-agent « Vérification des lots B01 à B05 »');
+  // Démarrage du sous-agent : il apprend où est sa fiche, comment y noter, et ce qui lui est fermé.
+  fs.writeFileSync(tSA(ID), briefDe(ID, MISSION));
+  const sa = { agent_id: ID, agent_type: 'general-purpose' };
+  const consigne = contexte(hook(dir, Object.assign({ hook_event_name: 'SubagentStart' }, base, sa)));
+  fs.appendFileSync(tSA(ID), injectee(consigne));
+  assert.match(consigne, /^Fichier contexte : tu es un sous-agent \(ligne C-0001 de l'orchestrateur\)\. Ta fiche : /);
+  assert.ok(consigne.includes(index.fiche));
+  assert.match(consigne, /Elle contient ta mission, mot pour mot\./);
+  assert.match(consigne, /context-ledger\.js" note --fiche a1b2c3d4e5f6a7b8c "fait : /);
+  assert.match(consigne, /elle ne se modifie pas : ajouter, etat, sans-travail et abandon lui sont réservés\./);
+  // Il sait lire des lignes par leur identifiant et la liste d'un autre agent.
+  assert.match(consigne, /un identifiant, chercher C-0151 C-0152, rend ces lignes entières ; --agent claude ou --agent codex pour la liste d'un autre agent/);
+  // Le sous-agent ne dévie pas de sa mission, et une ligne ouverte de la
+  // liste n'est pas une tâche « pas faite » ; s'il la constate faite, il la signale au lieu de la fermer.
+  assert.match(consigne, /\nTa mission est celle de ton lancement, rien d'autre : les messages de l'utilisateur, les « À trier » et les lignes ouvertes que tu as pu hériter de l'orchestrateur ou lire dans sa liste s'adressent à lui, ils ne te donnent aucun travail\.\n/);
+  assert.match(consigne, /« ouvert » veut dire « pas encore prouvé fait », pas « pas fait »/);
+  assert.match(consigne, /note --fiche a1b2c3d4e5f6a7b8c --genre deja-fait "C-NNNN : la preuve"`, l'orchestrateur vérifiera\./);
+  // Outil du sous-agent : rien à dire tant que son contexte n'est pas compacté (premier passage : base).
+  const outil = () => hook(dir, Object.assign({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base, sa));
+  assert.equal(outil().out, '');
+  // Il note son avancement dans SA fiche : texte gardé tel quel, daté, jamais réécrit.
+  const n = cli(dir, ['note', '--fiche', ID, '--genre', 'fait', 'B01 et B02 lus en entier ; reste : B03 à B05']);
+  assert.equal(n.code, 0, n.err);
+  assert.match(n.out, /^Noté dans .+ \(1 note\(s\)\)\./);
+  assert.match(fiche(), /\n- \d{4}-\d\d-\d\d \d\d:\d\d \| fait \| B01 et B02 lus en entier ; reste : B03 à B05\n$/);
+  assert.equal(cli(dir, ['note', '--fiche', 'inconnu', 'x']).code, 1, 'sous-agent sans fiche : erreur dite');
+  assert.equal(cli(dir, ['note', '--fiche', ID]).code, 1, 'note vide : erreur dite');
+  assert.equal(indexFiche(dir, ID).notes, 1);
+  // Son contexte est compacté : au prochain outil sa fiche lui est rendue (mission et notes), une seule fois.
+  fs.appendFileSync(tSA(ID), COMPACTAGE);
+  const reprise = contexte(outil());
+  assert.match(reprise, /^Fichier contexte : ton contexte de sous-agent vient d'être compacté\. Voici ta fiche \(/);
+  assert.ok(reprise.includes(MISSION), 'la mission lui revient mot pour mot');
+  assert.ok(reprise.includes('| fait | B01 et B02 lus en entier ; reste : B03 à B05'), 'ses notes aussi');
+  assert.ok(!/À trier :|Ouvert :|Bloqué : attend l'utilisateur/.test(reprise), 'jamais la liste de l\'orchestrateur');
+  assert.match(reprise, /Ta mission est celle de ton lancement, rien d'autre/);
+  assert.equal(outil().out, '', 'pas de seconde reprise pour le même compactage');
+  // Un résultat d'outil qui CITE le marqueur de compactage n'est pas un compactage.
+  const vuAvant = indexFiche(dir, ID).transcriptVu;
+  fs.appendFileSync(tSA(ID), JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: '{"type":"system","subtype":"compact_boundary"}' }] } }) + '\n');
+  assert.equal(outil().out, '');
+  // L'octet déjà vu n'avance que par paliers d'un mégaoctet : pas d'écriture de l'index à chaque outil.
+  assert.equal(indexFiche(dir, ID).transcriptVu, vuAvant);
+  // Un second compactage, plus tard : la fiche est rendue de nouveau.
+  const f = path.join(dir, '.fiches', `claude-${ID}.json`);
+  const i2 = indexFiche(dir, ID);
+  i2.repriseLe = new Date(Date.now() - 20 * 60000).toISOString();
+  fs.writeFileSync(f, JSON.stringify(i2));
+  fs.appendFileSync(tSA(ID), COMPACTAGE);
+  assert.match(contexte(outil()), /^Fichier contexte : ton contexte de sous-agent vient d'être compacté/);
+  assert.equal(indexFiche(dir, ID).reprises, 2);
+  // Sa fin est annoncée à l'orchestrateur avec sa fiche et le nombre de notes.
+  hook(dir, Object.assign({ hook_event_name: 'SubagentStop', stop_hook_active: false }, base, sa));
+  const annonce = contexte(hook(dir, Object.assign({ hook_event_name: 'PostToolUse', prompt_id: 'p-1', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base)));
+  assert.ok(annonce.includes(`sa fiche, 1 note(s) : ${index.fiche}`), annonce);
+  assert.equal(cli(dir, ['fiche', ID]).out.trim(), fiche().trim());
+});
+
+test('fiche de sous-agent : démarrage avant le retour de l\'outil de lancement, sous-agent jamais vu, et mission recopiée par le sous-agent', () => {
+  const { dir, tSA, base } = scene('fiche-ordre');
+  const ID = 'a0000000000000001';
+  const sa = { agent_id: ID, agent_type: 'Explore' };
+  const MISSION = 'Cherche où est calculée la TVA.';
+  // Le sous-agent démarre AVANT que l'orchestrateur ait reçu le retour de l'outil de lancement : la fiche
+  // naît sans ligne, avec la mission lue dans son transcript ; la ligne s'y ajoute ensuite.
+  fs.writeFileSync(tSA(ID), briefDe(ID, MISSION));
+  const c = contexte(hook(dir, Object.assign({ hook_event_name: 'SubagentStart' }, base, sa)));
+  assert.match(c, /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+  assert.equal(indexFiche(dir, ID).mission, true);
+  assert.equal(indexFiche(dir, ID).ligne, null);
+  // Titre de repli faute de mieux, marqué comme tel (constaté le 2026-10-03 : il restait dans la fiche).
+  assert.equal(indexFiche(dir, ID).titre, 'sous-agent Explore');
+  assert.equal(indexFiche(dir, ID).titreRepli, true);
+  hook(dir, Object.assign({
+    hook_event_name: 'PostToolUse', prompt_id: 'p-1', tool_name: 'Agent',
+    tool_input: { description: 'Recherche TVA', subagent_type: 'Explore', prompt: MISSION, run_in_background: true },
+    tool_response: { isAsync: true, status: 'async_launched', agentId: ID, outputFile: '' },
+  }, base));
+  const index = indexFiche(dir, ID);
+  assert.equal(index.ligne, 'C-0001', 'la ligne de suivi rejoint la fiche');
+  const texte = fs.readFileSync(index.fiche, 'utf8');
+  assert.ok(texte.includes('orchestrateur : C-0001 (lecture seule'));
+  assert.equal(texte.split(MISSION).length - 1, 1, 'la mission n\'est écrite qu\'une fois');
+  // Le vrai titre (description du lancement) remplace le titre de repli, en tête de la fiche et dans l'index.
+  assert.equal(texte.split('\n')[0], '# Fiche du sous-agent « Recherche TVA »');
+  assert.equal(index.titre, 'Recherche TVA');
+  assert.equal(index.titreRepli, undefined);
+  // Sous-agent lancé avant le branchement (aucun démarrage vu) : sa fiche naît à son premier outil, qui lui
+  // donne aussi sa consigne.
+  const ID2 = 'a0000000000000002';
+  fs.writeFileSync(tSA(ID2), briefDe(ID2, 'Audite les routes publiques.'));
+  const c2 = contexte(hook(dir, Object.assign({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base, { agent_id: ID2, agent_type: 'security-auditor' })));
+  assert.match(c2, /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+  fs.appendFileSync(tSA(ID2), injectee(c2, 'PostToolUse'));
+  assert.ok(fs.readFileSync(indexFiche(dir, ID2).fiche, 'utf8').includes('Audite les routes publiques.'));
+  // Mission illisible par le hook (cas de Codex : message de lancement chiffré) : la consigne demande au
+  // sous-agent de la recopier, et la commande note --genre mission la met à sa place.
+  const ID3 = 'a0000000000000003';
+  avecRacine(dir, () => core.creerFiche({ agent: 'claude', sessionId: SESSION_FICHE, id: ID3, projet: PROJET, titre: 'sans transcript', genre: 'worker' }));
+  const c3 = avecRacine(dir, () => core.texteConsigneSousAgent({ agent: 'claude', id: ID3, script: HOOK }));
+  assert.match(c3, /Ta mission n'a pas pu y être copiée automatiquement : commence par la recopier mot pour mot avec `node ".+" note --fiche a0000000000000003 --genre mission "\.\.\."`/);
+  assert.ok(fs.readFileSync(indexFiche(dir, ID3).fiche, 'utf8').includes(core.MISSION_ABSENTE));
+  const r3 = avecRacine(dir, () => core.texteRepriseSousAgent({ agent: 'claude', id: ID3, script: HOOK }));
+  // « Redemande-la avant de continuer » n'a été suivi par aucun sous-agent ; le brief en fichier, si.
+  assert.match(r3, /Ta mission n'y a pas été copiée : reprends-la de ton brief en fichier si l'orchestrateur t'en a donné un \(sinon du résumé\), recopie-la dans ta fiche \(note --genre mission\), et dis dans ton rapport qu'elle a été reprise ainsi\./);
+  assert.ok(!/redemande-la/.test(r3));
+  assert.equal(cli(dir, ['note', '--fiche', ID3, '--genre', 'mission', 'Relire les 35 rapports, ligne à ligne.']).code, 0);
+  const t3 = fs.readFileSync(indexFiche(dir, ID3).fiche, 'utf8');
+  assert.ok(t3.includes('## Mission (mot pour mot)\n\nRelire les 35 rapports, ligne à ligne.\n'));
+  assert.ok(!t3.includes(core.MISSION_ABSENTE));
+  assert.equal(indexFiche(dir, ID3).mission, true);
+  assert.equal(indexFiche(dir, ID3).notes, 0, 'la mission n\'est pas une note');
+  // Compactage annoncé par son propre événement (PostCompact porte l'identité du sous-agent : mesuré dans
+  // Codex) : rien ne peut être injecté à ce moment, la fiche est rendue à son prochain outil, une fois.
+  const sa2 = { agent_id: ID2, agent_type: 'security-auditor' };
+  const outil2 = () => hook(dir, Object.assign({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base, sa2));
+  assert.equal(outil2().out, '');
+  assert.equal(hook(dir, Object.assign({ hook_event_name: 'PostCompact', trigger: 'auto' }, base, sa2)).out, '');
+  assert.match(contexte(outil2()), /^Fichier contexte : ton contexte de sous-agent vient d'être compacté\. Voici ta fiche \(/);
+  assert.equal(outil2().out, '');
+});
+
+// Mesuré le 2026-10-02 dans Codex : la consigne du démarrage n'est arrivée qu'à 2 sous-agents sur 22 (hook de
+// démarrage tué par son délai, ou jamais déclenché). Filet : le premier événement du sous-agent la donne.
+test('fiche de sous-agent : consigne donnée au premier outil quand le démarrage ne l\'a pas donnée, une seule fois', () => {
+  const { dir, tSA, base } = scene('fiche-consigne');
+  const outil = sa => hook(dir, Object.assign({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base, sa));
+  const nouveau = (id, mission) => { fs.writeFileSync(tSA(id), briefDe(id, mission)); return { agent_id: id, agent_type: 'general-purpose' }; };
+  // Démarrage jamais vu : la consigne arrive avec son premier outil, puis plus jamais.
+  const A = nouveau('a000000000000000a', 'Relis le module de paiement.');
+  const c = contexte(outil(A));
+  assert.match(c, /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+  assert.match(c, /Elle contient ta mission, mot pour mot\./);
+  assert.match(c, /\nTa mission est celle de ton lancement, rien d'autre : /);
+  assert.ok(indexFiche(dir, A.agent_id).consigneLe);
+  fs.appendFileSync(tSA(A.agent_id), injectee(c, 'PostToolUse'));
+  assert.equal(outil(A).out, '', 'la consigne n\'est donnée qu\'une fois');
+  // Démarrage vu : la consigne a été donnée là (et écrite dans son transcript), le premier outil ne la redit pas.
+  const B = nouveau('a000000000000000b', 'Relis le module de livraison.');
+  const cB = contexte(hook(dir, Object.assign({ hook_event_name: 'SubagentStart' }, base, B)));
+  assert.match(cB, /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+  fs.appendFileSync(tSA(B.agent_id), injectee(cB));
+  assert.ok(indexFiche(dir, B.agent_id).consigneLe);
+  assert.equal(outil(B).out, '');
+  // Fiche rendue après un compactage avant toute consigne : elle vaut consigne.
+  const C = nouveau('a000000000000000c', 'Relis le module de stock.');
+  assert.equal(hook(dir, Object.assign({ hook_event_name: 'PostCompact', trigger: 'auto' }, base, C)).out, '');
+  assert.match(contexte(outil(C)), /^Fichier contexte : ton contexte de sous-agent vient d'être compacté/);
+  assert.equal(outil(C).out, '');
+});
+
+// Constaté le 2026-10-02 dans Codex : le hook de démarrage d'un sous-agent a posé sa
+// marque puis a été tué par son délai, sortie jetée ; le filet du premier outil ne redonnait rien, la marque
+// étant posée. Depuis : marque posée mais consigne absente de son transcript = redonnée, une fois.
+test('fiche de sous-agent : consigne marquée au démarrage mais absente de son transcript : redonnée au premier outil, une fois', () => {
+  const { dir, tSA, base } = scene('fiche-consigne-absente');
+  const outil = sa => hook(dir, Object.assign({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base, sa));
+  const demarrer = (id, mission) => {
+    fs.writeFileSync(tSA(id), briefDe(id, mission));
+    const sa = { agent_id: id, agent_type: 'general-purpose' };
+    return { sa, consigne: contexte(hook(dir, Object.assign({ hook_event_name: 'SubagentStart' }, base, sa))) };
+  };
+  // Consigne parvenue (écrite dans son transcript) : le premier outil ne la redit pas, et ne la cherche plus.
+  const A = demarrer('a00000000000000d1', 'Relis le module de paiement.');
+  fs.appendFileSync(tSA(A.sa.agent_id), injectee(A.consigne));
+  assert.equal(outil(A.sa).out, '');
+  const iA = indexFiche(dir, A.sa.agent_id);
+  assert.equal(iA.consigneVue, true);
+  assert.ok(iA.consigneVerifieeLe);
+  assert.equal(outil(A.sa).out, '');
+  assert.equal(indexFiche(dir, A.sa.agent_id).consigneVerifieeLe, iA.consigneVerifieeLe, 'cherchée une seule fois');
+  // Hook de démarrage tué après sa marque : rien dans son transcript, la consigne est redonnée, une fois.
+  const B = demarrer('a00000000000000d2', 'Relis le module de livraison.');
+  assert.ok(indexFiche(dir, B.sa.agent_id).consigneLe);
+  const c = contexte(outil(B.sa));
+  assert.match(c, /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+  assert.ok(c.includes('note --fiche a00000000000000d2 '));
+  assert.equal(indexFiche(dir, B.sa.agent_id).consigneVue, false);
+  assert.equal(outil(B.sa).out, '', 'redonnée une seule fois');
+  // Ne comptent pas : son brief qui cite la phrase de la consigne (forme mesurée chez Claude le 2026-10-03), ni
+  // la consigne injectée d'un autre sous-agent.
+  const C = demarrer('a00000000000000d3', 'Fichier contexte : tu es un sous-agent. Note avec note --fiche a00000000000000d3 "x".');
+  fs.appendFileSync(tSA(C.sa.agent_id), injectee(A.consigne));
+  assert.match(contexte(outil(C.sa)), /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+  // Transcript introuvable : redonnée aussi (une redite coûte moins qu'une consigne perdue).
+  const D = demarrer('a00000000000000d4', 'Relis le module de stock.');
+  fs.rmSync(tSA(D.sa.agent_id));
+  assert.match(contexte(outil(D.sa)), /^Fichier contexte : tu es un sous-agent\. Ta fiche : /);
+});
+
+test('compactage d\'un sous-agent vu par SessionStart sans agent_id : il reçoit sa fiche, jamais la liste de l\'orchestrateur', () => {
+  const { dir, t, tSA, base } = scene('fiche-session-start');
+  const ID = 'a9f8e7d6c5b4a3f2e';
+  hook(dir, Object.assign({ hook_event_name: 'UserPromptSubmit', prompt_id: 'p-1', prompt: 'Corrige le bouton de paiement, il ne répond plus' }, base));
+  cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0001', 'Corriger le bouton de paiement']);
+  fs.writeFileSync(tSA(ID), briefDe(ID, 'MISSION : auditer les droits des tables.'));
+  // Défaut mesuré le 2026-10-02 : cet événement ne porte pas agent_id, et le hook injectait au sous-agent la
+  // liste de l'orchestrateur. Le chemin de son transcript (dossier subagents) le fait reconnaître.
+  const debutSA = { hook_event_name: 'SessionStart', session_id: SESSION_FICHE, cwd: CWD_PROJET, transcript_path: tSA(ID), source: 'compact' };
+  const r = contexte(hook(dir, debutSA));
+  assert.match(r, /^Fichier contexte : ton contexte de sous-agent vient d'être compacté/);
+  assert.ok(r.includes('MISSION : auditer les droits des tables.'));
+  assert.ok(!r.includes('Corriger le bouton de paiement'), 'jamais la liste de l\'orchestrateur');
+  // Le marqueur de ce même compactage est écrit dans son transcript juste après : pas de seconde reprise.
+  fs.appendFileSync(tSA(ID), COMPACTAGE);
+  assert.equal(hook(dir, Object.assign({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base, { agent_id: ID, agent_type: 'x' })).out, '');
+  // L'orchestrateur, lui, reçoit toujours sa liste après SON compactage.
+  const o = contexte(hook(dir, Object.assign({ hook_event_name: 'SessionStart', source: 'compact' }, base)));
+  assert.match(o, /Ce fichier fait foi pour ce qui reste, pas le résumé de compactage\./);
+  assert.match(o, /Corriger le bouton de paiement/);
+  // Et l'octet déjà vu de SON transcript n'a pas été remplacé par celui du transcript du sous-agent.
+  assert.equal(avecRacine(dir, () => core.lireSession('claude', SESSION_FICHE)).transcriptVu, fs.statSync(t).size);
+});
+
+// Cas à couvrir : « si un autre agent voit dans un fichier contexte du parent qu'une tâche
+// n'est pas faite alors qu'elle est faite mais pas supprimée ». Le sous-agent ne ferme rien : il signale.
+test('signalement d\'un sous-agent (déjà fait, bloqué, question) : dit à l\'orchestrateur à son prochain outil, une fois, sans attendre la fin', () => {
+  const { dir, base } = scene('fiche-signalement');
+  const ID = 'a5ca1e0000000001a';
+  hook(dir, Object.assign({ hook_event_name: 'UserPromptSubmit', prompt_id: 'p-1', prompt: 'Corrige le bouton de paiement, il ne répond plus' }, base));
+  cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0001', 'Corriger le bouton de paiement']);
+  hook(dir, Object.assign({
+    hook_event_name: 'PostToolUse', prompt_id: 'p-1', tool_name: 'Agent',
+    tool_input: { description: 'Audit du tunnel de commande', subagent_type: 'general-purpose', prompt: 'Audite le tunnel.', run_in_background: true },
+    tool_response: { isAsync: true, status: 'async_launched', agentId: ID, outputFile: '' },
+  }, base));
+  const outil = () => hook(dir, Object.assign({ hook_event_name: 'PostToolUse', prompt_id: 'p-1', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} }, base));
+  assert.equal(outil().out, '', 'rien à signaler');
+  // Le sous-agent constate que C-0001 est déjà corrigé : il ne peut pas fermer la ligne, il le signale.
+  const n = cli(dir, ['note', '--fiche', ID, '--genre', 'Déjà fait', 'C-0001 : corrigé par le commit abc1234 (BoutonPaiement.tsx:42)']);
+  assert.equal(n.code, 0, n.err);
+  cli(dir, ['note', '--fiche', ID, 'note ordinaire, sans signalement']);
+  const o = contexte(outil());
+  assert.match(o, /^Signalement du sous-agent C-0002 « Audit du tunnel de commande » \(deja-fait\) : « C-0001 : corrigé par le commit abc1234 \(BoutonPaiement\.tsx:42\) »\. Vérifie dans le code ou l'historique : si c'est exact, ferme la ligne par une preuve \[ctx C-NNNN\] ; sinon réponds-lui\. Sa fiche : /);
+  assert.ok(!o.includes('note ordinaire'), 'une note ordinaire n\'est pas un signalement');
+  assert.equal(outil().out, '', 'un signalement n\'est dit qu\'une fois');
+  assert.equal(etat(dir).lignes['C-0001'].statut, 'ouvert', 'la ligne ne se ferme que sur la preuve de l\'orchestrateur');
+  // Question et blocage : dits aussi, avec ce que l'orchestrateur doit faire.
+  cli(dir, ['note', '--fiche', ID, '--genre', 'question', 'Quelle branche pour le correctif ?']);
+  cli(dir, ['note', '--fiche', ID, '--genre', 'bloque', 'pas d\'accès à la base de préproduction']);
+  const o2 = contexte(outil());
+  assert.match(o2, /\(question\) : « Quelle branche pour le correctif \? »\. Réponds-lui\. Sa fiche : /);
+  assert.match(o2, /\(bloque\) : « pas d'accès à la base de préproduction »\. Débloque-le ou réponds-lui : il attend\. Sa fiche : /);
+  assert.equal(outil().out, '');
+  assert.equal(indexFiche(dir, ID).notes, 4);
+  assert.equal(indexFiche(dir, ID).signalements.length, 3);
+});
+
+test('transcript d\'un sous-agent : jamais lu avec l\'octet déjà vu de l\'orchestrateur (Claude : dossier subagents ; Codex : autre fil)', () => {
+  const dir = dossier('transcript-sous-agent');
+  const S = '01a0f9c2-ee5a-78c2-8f76-422e0199aea6';
+  const d = path.join(RUN, 'transcript-sous-agent-fichiers');
+  fs.mkdirSync(path.join(d, S, 'subagents'), { recursive: true });
+  const ligne = JSON.stringify({ type: 'user', message: { content: 'x' } }) + '\n';
+  const racineClaude = path.join(d, `${S}.jsonl`);
+  const enfantClaude = path.join(d, S, 'subagents', 'agent-a1.jsonl');
+  const racineCodex = path.join(d, `rollout-2026-10-02T00-18-16-${S}.jsonl`);
+  const enfantCodex = path.join(d, 'rollout-2026-10-02T00-33-32-01a0f9d0-e693-7861-bb33-434fd1182af0.jsonl');
+  for (const f of [racineClaude, enfantClaude, racineCodex, enfantCodex]) fs.writeFileSync(f, ligne);
+  const suite = (agent, fichier) => avecRacine(dir, () => core.suiteTranscript({ agent, sessionId: S, fichier, surLigne: () => {} }));
+  assert.deepEqual(suite('claude', racineClaude), { vu: ligne.length, base: true });
+  assert.equal(suite('claude', enfantClaude), null);
+  assert.deepEqual(suite('codex', racineCodex), { vu: ligne.length, base: true });
+  assert.equal(suite('codex', enfantCodex), null);
+  // Claude : un transcript au nom inattendu n'est pas pris pour un sous-agent (l'orchestrateur ne se tait jamais).
+  assert.equal(core.transcriptDUnSousAgent(enfantCodex, S, 'claude'), false);
+  assert.equal(core.idDepuisTranscript(enfantClaude), 'a1');
+});
+
+test('chercher : lecture seule, plusieurs mots, liste d\'un autre agent', () => {
+  const dir = dossier('chercher');
+  preparerLigne(dir, 'Corriger le bouton de paiement du tunnel de commande');
+  cli(dir, ['ajouter', '--projet', PROJET, 'Arbitrer la licence LGPL de fpdf2']);
+  cli(dir, ['etat', '--projet', PROJET, 'C-0002', 'bloque-utilisateur', 'attend la décision sur la licence']);
+  const photo = () => {
+    const out = [];
+    const voir = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) voir(p); else { const s = fs.statSync(p); out.push(`${p}|${s.size}|${s.mtimeMs}`); } } };
+    voir(dir);
+    return out.sort();
+  };
+  const avant = photo();
+  const r = cli(dir, ['chercher', '--projet', PROJET, 'paiement', 'lgpl', 'décision sur la licence', 'introuvable']);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^Recherche dans projet-demo\.claude \(2 lignes C, 1 messages M\) :/);
+  assert.match(r.out, /« paiement » : 2 résultat\(s\)\n {2}C-0001 \| ouvert \| Corriger le bouton de paiement du tunnel de commande\n {2}M-0001 \| converti \| /);
+  assert.match(r.out, /« lgpl » : 1 résultat\(s\)\n {2}C-0002 \| bloque-utilisateur \| Arbitrer la licence LGPL de fpdf2/);
+  assert.match(r.out, /« décision sur la licence » : 1 résultat\(s\)\n {2}C-0002 \| bloque-utilisateur \| note : attend la décision sur la licence/);
+  assert.match(r.out, /« introuvable » : 0 résultat\(s\)/);
+  assert.match(r.out, /\nRappel : « ouvert » veut dire « pas encore prouvé fait », pas « pas fait » : avant d'agir sur une ligne ou de la dire non faite, mesure dans le code ou l'historique\. Une ligne que tu constates déjà faite se signale à celui qui tient la liste/);
+  assert.deepEqual(photo(), avant, 'chercher n\'écrit rien');
+  assert.match(cli(dir, ['chercher', '--agent', 'codex', 'paiement']).out, /^Aucun fichier contexte pour l'agent codex\./);
+  assert.equal(cli(dir, ['chercher', '--agent', 'inconnu', 'x']).code, 1);
+  assert.equal(cli(dir, ['chercher', '--projet', PROJET]).code, 1, 'aucun mot : erreur dite');
+  // Un identifiant rend la ligne ou le message ENTIER (besoin relevé le 2026-10-02 : boucles de
+  // sous-agents sur plusieurs C-NNNN.txt) ; un texte très long est borné, avec le chemin du texte entier.
+  cli(dir, ['ajouter', '--projet', PROJET, 'Texte long. '.repeat(600)]);
+  const parId = cli(dir, ['chercher', '--projet', PROJET, 'C-0002', 'm-0001', 'C-0003', 'C-9999']);
+  assert.equal(parId.code, 0, parId.err);
+  assert.match(parId.out, /\nC-0002 \| \d{4}-\d\d-\d\d \d\d:\d\d \| bloque-utilisateur\n {2}texte : Arbitrer la licence LGPL de fpdf2\n {2}note : attend la décision sur la licence\n/);
+  assert.match(parId.out, /\nM-0001 \| .+ \| converti \| lignes C-0001\n {2}texte : Corrige le bouton de paiement, il ne répond plus\n/);
+  assert.match(parId.out, /\nC-0003 \| .+ \| ouvert\n {2}texte : (Texte long\. ){500} \[…\] \(texte entier : .+C-0003\.txt\)\n/);
+  assert.match(parId.out, /\n« C-9999 » : absent de cette liste\n/);
+});
+
+// Environ 1,3 % des PreToolUse de sous-agents Codex ne laissaient aucune trace dans la capture : sa
+// ligne s'écrit à la sortie du processus, jamais quand le hook est tué. Une ligne courte au début le mesure.
+test('capture de diagnostic : une ligne au début du hook, une à la fin ; un hook tué ne laisse que la première', () => {
+  const dir = dossier('capture');
+  const tmp = path.join(RUN, 'capture-tmp');
+  const capture = path.join(tmp, 'agent-memory-ledger', 'capture-hooks');
+  fs.mkdirSync(capture, { recursive: true });
+  fs.writeFileSync(path.join(capture, 'actif'), '');
+  const env = Object.assign(envPour(dir), { TEMP: tmp, TMP: tmp });
+  const lire = f => (fs.existsSync(path.join(capture, f)) ? fs.readFileSync(path.join(capture, f), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []);
+  const payload = { hook_event_name: 'PreToolUse', session_id: 's', agent_id: 'a1', tool_name: 'Bash', tool_input: { command: 'echo contenu-jamais-capture' }, cwd: CWD_PROJET };
+  const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(payload), env, encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(r.status, 0, r.stderr);
+  const debuts = lire('claude.debuts.jsonl');
+  assert.equal(debuts.length, 1, 'une ligne au début');
+  // La session sert à écarter les hooks lancés par des bancs quand on compte les hooks tués.
+  assert.deepEqual([debuts[0].evt, debuts[0].session_id, debuts[0].agent_id, debuts[0].tool_name], ['PreToolUse', 's', 'a1', 'Bash']);
+  assert.ok(debuts[0].pid > 0 && debuts[0].demarrage_ms >= 0);
+  const fins = lire('claude.jsonl');
+  assert.equal(fins.length, 1, 'une ligne à la fin');
+  assert.equal(fins[0].pid, debuts[0].pid);
+  assert.ok(!JSON.stringify([debuts, fins]).includes('contenu-jamais-capture'), 'aucun contenu capturé');
+  // Hook tué comme par son délai (fin brutale du processus) : la ligne de début reste, celle de fin manque.
+  const tue = spawnSync(process.execPath, ['-e', `const core = require(${JSON.stringify(CORE_PATH)}); core.capturerEvenement({ agent: 'claude', input: { hook_event_name: 'PreToolUse', agent_id: 'a2' }, octets: 1 }); process.kill(process.pid, 'SIGKILL');`], { env, encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.notEqual(tue.status, 0);
+  assert.deepEqual(lire('claude.debuts.jsonl').map(x => x.agent_id), ['a1', 'a2']);
+  assert.deepEqual(lire('claude.jsonl').map(x => x.agent_id), ['a1']);
+});
+
+// Constaté dans une session réelle : « Fichier contexte : rappel de fin de tour, hook timed out after 10s ».
+// Mesuré : le hook prend moins d'une seconde au repos ; sous forte charge, le démarrage de node et l'attente
+// d'un verrou occupé le font dépasser. Un hook tué ne rend rien : les attentes s'arrêtent donc à l'échéance.
+test('budget de temps : l\'attente d\'un verrou s\'arrête à l\'échéance du hook, démarrage compris', () => {
+  const dir = dossier('budget');
+  fs.mkdirSync(path.join(dir, '.sessions'), { recursive: true });
+  const code = budget => `
+    const core = require(${JSON.stringify(CORE_PATH)});
+    const fs = require('fs'); const path = require('path');
+    fs.writeFileSync(path.join(process.env.CONTEXT_LEDGER_DIR, '.sessions', 'claude-s-budget.json.lock'), 'tenu');
+    ${budget ? `core.fixerBudget(${budget});` : ''}
+    const d = Date.now(); let e = '';
+    try { core.modifierSession('claude', 's-budget', x => { x.vu = 1; }); } catch (x) { e = x.message; }
+    process.stdout.write(JSON.stringify({ ms: Date.now() - d, e, reste: core.tempsRestant() }));`;
+  const lancer = budget => {
+    const env = Object.assign({}, process.env, { CONTEXT_LEDGER_DIR: dir });
+    delete env.CONTEXT_LEDGER_BUDGET_MS;
+    return JSON.parse(spawnSync(process.execPath, ['-e', code(budget)], { env, encoding: 'utf8', timeout: 60000, windowsHide: true }).stdout);
+  };
+  const sans = lancer(0);
+  assert.match(sans.e, /verrou occupé/);
+  assert.ok(sans.ms >= 2500, `sans budget, l'attente normale d'un verrou dure 3 s (mesuré : ${sans.ms} ms)`);
+  assert.equal(sans.reste, null, 'sans budget : pas d\'échéance (Infinity)');
+  const avec = lancer(1);
+  assert.match(avec.e, /verrou occupé/);
+  assert.ok(avec.ms < 1500, `budget épuisé : aucune attente (mesuré : ${avec.ms} ms)`);
+  assert.ok(avec.reste < 0);
+});
+
+test('mutation : fiches de sous-agents, lecture de la liste, signalements, budget de temps -> banc rouge', { skip: EN_MUTATION }, () => {
+  const motif = '^(fiche de sous-agent|compactage d.un sous-agent|signalement d.un sous-agent|transcript d.un sous-agent|chercher|budget de temps|garde : sous-agent|message humain|capture de diagnostic)';
+  const temoin = relancer(copie('temoin-fiches'), motif);
+  assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
+  const NOYAU = 'lib/context-ledger-core.js';
+  const ADAPTATEUR = 'claude/context-ledger.js';
+  // Chaque mutation ne rejoue que le test qui doit rougir (le témoin, lui, les a tous rejoués verts).
+  const FICHE = '^fiche de sous-agent : mission';
+  const COMPACT = '^compactage d.un sous-agent';
+  const GARDE = '^garde : sous-agent : ';
+  const mutations = [
+    ['fiche-creation', '      // MUTATION : fiche jamais écrite', /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    ['fiche-mission', '    // MUTATION : mission jamais copiée dans la fiche', /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    ['fiche-note', '    // MUTATION : note du sous-agent perdue', /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    ['fiche-compactage', '      // MUTATION : compactage du sous-agent jamais vu', /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    ['fiche-annonce-par-evenement', '  // MUTATION : compactage annoncé par son événement ignoré', /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
+    ['consigne-ne-devie-pas', "    '', // MUTATION : la consigne ne dit plus au sous-agent de s'en tenir à sa mission", /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    ['reprise-sous-agent', '  // MUTATION : fiche jamais rendue au sous-agent', /not ok \d+ - fiche de sous-agent : mission copiée/, ADAPTATEUR, FICHE],
+    ['consigne-filet', '  // MUTATION : consigne jamais donnée quand le démarrage du sous-agent n\'a pas été vu', /not ok \d+ - fiche de sous-agent : consigne donnée/, ADAPTATEUR, '^fiche de sous-agent : consigne'],
+    ['fiche-reprise-unique', '  const rendre = trouve || !!annonce; // MUTATION : la fiche est rendue deux fois pour un même compactage', /not ok \d+ - compactage d.un sous-agent vu par SessionStart/, NOYAU, COMPACT],
+    ['sous-agent-par-transcript', '  // MUTATION : sous-agent sans agent_id pris pour l\'orchestrateur', /not ok \d+ - compactage d.un sous-agent vu par SessionStart/, ADAPTATEUR, COMPACT],
+    ['fiche-signalement', '    continue; // MUTATION : signalements des sous-agents jamais dits', /not ok \d+ - signalement d.un sous-agent/, NOYAU, '^signalement d.un sous-agent'],
+    ['pour-orchestrateur', '  const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}`; // MUTATION : destinataire non dit', /not ok \d+ - message humain/, NOYAU, '^message humain'],
+    ['chercher-rappel', '  // MUTATION : rappel « ouvert n\'est pas pas fait » retiré', /not ok \d+ - chercher/, NOYAU, '^chercher'],
+    ['lecture-sous-agent', '      if (touche) return RAISON_SOUS_AGENT; // MUTATION : lecture de nouveau refusée au sous-agent', /not ok \d+ - garde : sous-agent : écriture/, NOYAU, GARDE],
+    ['cli-sous-agent', '  if (RE_CLI_SEGMENT.test(s)) return true; // MUTATION : toute la CLI ouverte au sous-agent', /not ok \d+ - garde : sous-agent : écriture/, NOYAU, GARDE],
+    ['note-propre-fiche', '  return true; // MUTATION : un sous-agent note dans la fiche d\'un autre', /not ok \d+ - garde : sous-agent : écriture/, NOYAU, GARDE],
+    ['transcript-sous-agent', '  // MUTATION : le transcript d\'un sous-agent est lu avec l\'octet de l\'orchestrateur', /not ok \d+ - transcript d.un sous-agent/, NOYAU, '^transcript d.un sous-agent'],
+    ['echeance-verrou', '  const limite = Date.now() + DELAI_VERROU_MS; // MUTATION : attente sans échéance', /not ok \d+ - budget de temps/, NOYAU, '^budget de temps'],
+    // Consigne marquée mais absente du transcript du sous-agent.
+    ['consigne-vue', '      vue = true; // MUTATION : toute ligne qui cite la consigne compte, brief compris', /not ok \d+ - fiche de sous-agent : consigne marquée/, NOYAU, '^fiche de sous-agent : consigne marquée'],
+    ['consigne-redonnee', '      return false; // MUTATION : consigne absente du transcript jamais redonnée', /not ok \d+ - fiche de sous-agent : consigne marquée/, NOYAU, '^fiche de sous-agent : consigne marquée'],
+    ['capture-debut', '    // MUTATION : pas de ligne au début du hook', /not ok \d+ - capture de diagnostic/, NOYAU, '^capture de diagnostic'],
+    // Titre de repli, mission absente, chercher par identifiant, aide, formes de lecture de la garde.
+    ['fiche-titre', '      if (false) { // MUTATION : titre de repli jamais remplacé', /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
+    ['reprise-sans-mission', "  const sansMission = f.index.mission ? '' : ' Ta mission n\\'y a pas été copiée : si le résumé ne te la rend pas mot pour mot, redemande-la à l\\'orchestrateur avant de continuer, puis recopie-la dans ta fiche (note --genre mission).'; // MUTATION : ancienne formulation", /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
+    ['chercher-id', '      const t = null; // MUTATION : un identifiant cherché comme un simple mot', /not ok \d+ - chercher/, NOYAU, '^chercher'],
+    ['cli-help', '    // MUTATION : help inconnue de la CLI', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    ['blocs-surs', '  let masque = masquerChaines(c); // MUTATION : blocs sans effet refusés comme avant', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    ['sous-expression-collee', '      // MUTATION : parenthèse collée à un nom (méthode) remplacée aussi', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    ['sous-expression-appel', '    // MUTATION : & (x) accepté', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    ['variable-pipeline', '    // MUTATION : variable acceptée après un |', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    ['masque-utf16', '  const masque = [...c]; // MUTATION : masque par points de code, segments décalés', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+  ];
+  for (const [ancre, remplacement, rouge, fichier, seul] of mutations) {
+    const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), seul);
+    assert.notEqual(r.status, 0, `la mutation ${ancre} doit rendre un banc rouge :\n` + r.stdout);
+    assert.match(r.stdout, rouge, ancre);
+  }
+});
+
+// ---------------------------------------------------------------------------
 test('questionnaire : les réponses de l\'utilisateur sont enregistrées mot pour mot, une seule fois, et valent contre-ordre', () => {
   const dir = dossier('questionnaire');
   preparerLigne(dir);
@@ -1601,7 +2198,7 @@ test('mutation : livraisons non inscrites, fin non marquée, rappel retiré, rep
   const mutations = [
     ['livraison-lancement', '  return null; // MUTATION : aucune ligne créée au lancement', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
     ['livraison-fin', '  return null; // MUTATION : fin de sous-agent non marquée', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
-    ['livraison-rappel', '  const attente = []; // MUTATION : rappel des livraisons retiré', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
+    ['livraison-rappel-fin-de-tour', '  const attente = []; // MUTATION : rappel des livraisons retiré', /not ok \d+ - sous-agent en arri.re-plan/, NOYAU],
     ['livraison-reprise', '  return null; // MUTATION : nouveau résultat après clôture non suivi', /not ok \d+ - sous-agent repris/, NOYAU],
     ['livraison-annonce', '  const nouvelles = []; // MUTATION : fin marquée en silence jamais annoncée', /not ok \d+ - sous-agent fini pendant/, NOYAU],
     ['livraison-rappel-en-cours', '  const rappeler = false; // MUTATION : rappel en cours de tour retiré', /not ok \d+ - sous-agent fini pendant/, NOYAU],

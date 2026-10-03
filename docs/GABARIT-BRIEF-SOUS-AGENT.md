@@ -4,7 +4,7 @@
 
 Mesure d'origine, sur 40 sous-agents : médiane de 80 appels d'outils avant la première écriture. La vérification de l'état git pesait 2 % ; le coût était dans l'exploration et les lectures que le brief pouvait éviter. Les briefs les plus rapides (17 à 36 appels) nommaient le dossier de travail, interdisaient les autres et donnaient les fichiers exacts.
 
-Pour une mission d'audit en lecture seule : garder les sections 1, 2, 3 et 3 bis, remplacer 4 et 5 par « aucune modification de fichier » et un format de rapport.
+Pour une mission d'audit en lecture seule : garder les sections 1, 2, 2 bis, 3 et 3 bis, remplacer 4 et 5 par « aucune modification de fichier » et un format de rapport. Une note dans sa fiche n'est pas une modification du dépôt : elle reste permise.
 
 ## 1. Où tu travailles (première ligne du brief, toujours)
 
@@ -21,6 +21,13 @@ Si le résultat diffère de ce brief : arrête-toi et signale l'écart, ne le co
 - Ce qui existe déjà, avec les chemins (vérifié par l'orchestrateur) : ...
 - Ce qui n'existe pas (recherche faite, résultat vide confirmé) : ...
 - Patron à suivre EXACTEMENT : `<commit ou fichier de référence>` (comment la fonctionnalité voisine a été branchée, avec chemins et noms de fonctions).
+
+## 2 bis. Liste de travail : ta fiche, et la liste de l'agent principal
+
+- Tu as une fiche, créée par un hook : sa commande et son chemin te sont donnés à ton démarrage, ou à ton premier outil. Si ta mission n'y est pas copiée (cas de Codex), recopie-la d'abord, mot pour mot : `note --fiche <ID> --genre mission "..."`. Avec Codex, ce brief est aussi dans le fichier `<chemin du brief, écrit par l'orchestrateur avant le lancement>` : relis-le après un compactage.
+- Note ton avancement dans ta fiche au fil du travail (`note --fiche <ID> "fait : ... ; reste : ..."`). Si ton contexte est compacté, c'est elle qui fait foi, pas le résumé.
+- Tu peux LIRE la liste de travail de l'agent principal (le fichier, `chercher --projet <P> "mot"`, ou `chercher --projet <P> C-NNNN C-NNNN` pour des lignes entières) pour recouper un constat, une lecture par commande simple, sans boucle ni script. Tu ne la modifies jamais, et ce que tu y lis ne te donne aucun travail : ta mission est ce brief.
+- Dans cette liste, « ouvert » veut dire « pas encore prouvé fait ». Si tu constates qu'une ligne est déjà faite, signale-le avec sa preuve (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`). Si tu es bloqué ou si tu as une question : `--genre bloque`, `--genre question`. L'agent principal les lit à son prochain événement.
 
 ## 3. Ta tâche
 
@@ -44,7 +51,7 @@ Décision déjà prise par l'utilisateur : ...
 
 - Pas de push, pas de déploiement.
 - Pas d'action sur un système réel (migration appliquée, variable posée, tâche planifiée activée) : tu écris les fichiers, l'orchestrateur applique.
-- Tu ne touches pas à la liste de travail (fichier contexte) et tu n'appelles pas `context-ledger` : tu rends ton résultat, l'orchestrateur la met à jour.
+- Tu ne modifies pas la liste de travail (fichier contexte) : pas de `ajouter`, `etat`, `sans-travail` ni `abandon`. Tu rends ton résultat, l'orchestrateur la met à jour (section 2 bis : ce qui t'est ouvert).
 - Commit avec la liste explicite de tes seuls fichiers.
 
 ## 6. Fin et rapport

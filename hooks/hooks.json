@@ -48,7 +48,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 30,
             "statusMessage": "Garde de la liste de travail..."
           }
         ]
@@ -61,7 +61,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
-            "timeout": 15,
+            "timeout": 30,
             "statusMessage": "Liste de travail : preuves [ctx]..."
           }
         ]
@@ -95,7 +95,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 30,
             "statusMessage": "Liste de travail : rappel de fin de tour..."
           },
           {
@@ -113,7 +113,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 30,
             "statusMessage": "Liste de travail : fin de sous-agent..."
           }
         ]
@@ -140,6 +140,30 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/fin-session.js\" --agent claude",
             "timeout": 10,
             "statusMessage": "Mémoire : filet de fin de session..."
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 30,
+            "statusMessage": "Liste de travail : fiche du sous-agent..."
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
+            "timeout": 30,
+            "statusMessage": "Liste de travail : compactage d'un sous-agent..."
           }
         ]
       }

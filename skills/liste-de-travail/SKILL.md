@@ -1,6 +1,6 @@
 ---
 name: liste-de-travail
-description: Règles de la liste de travail tenue par agent-memory-ledger. À utiliser dès qu'un hook injecte « Fichier contexte », un message M-NNNN à trier, une ligne C-NNNN, ou un rappel de sous-agent terminé, et avant de répondre « c'est fini » ou « il ne reste que ».
+description: Règles de la liste de travail tenue par agent-memory-ledger. À utiliser dès qu'un hook injecte « Fichier contexte », un message M-NNNN à trier, une ligne C-NNNN, un rappel de sous-agent terminé ou un signalement de sous-agent, quand tu es toi-même un sous-agent qui reçoit sa fiche, et avant de répondre « c'est fini » ou « il ne reste que ».
 ---
 
 # Liste de travail (fichier contexte)
@@ -12,6 +12,7 @@ Les hooks de ce plugin tiennent, sur disque, la liste de ce que l'utilisateur a 
 - Chaque message de l'utilisateur est enregistré mot pour mot : `M-NNNN`, section « À trier ».
 - La liste est réinjectée au début de session, après un compactage, et quand elle change.
 - Chaque sous-agent ou workflow lancé en arrière-plan reçoit une ligne `[agent]`. À sa fin, elle devient « TERMINÉ, résultat à traiter » : tu en es prévenu à ton prochain outil, puis rappelé toutes les 20 minutes tant que le résultat attend.
+- Chaque sous-agent a sa fiche sur disque : sa mission mot pour mot, puis les notes qu'il y ajoute. Elle lui est rendue après un compactage de son contexte. Ce qu'il te signale (une ligne déjà faite, un blocage, une question) t'est dit à ton prochain événement, sans attendre sa fin.
 - À chaque fin de tour, un rappel cite ce qui n'est ni fait ni mentionné dans ta réponse.
 
 Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemin et le bon projet. Utilise-la telle quelle.
@@ -24,13 +25,24 @@ Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemi
 4. **Prouver pour retirer.** Aucune commande ne marque « fait ». Quand le travail est fait, cite `[ctx C-NNNN]` dans l'entrée d'historique qui le décrit, ou dans le message du commit. S'il n'est pas fini : `[ctx C-NNNN partiel]`. Le hook retire la ligne sur cette preuve écrite.
 5. **Dire l'état.** `etat --projet P C-NNNN en-cours|bloque-utilisateur|ouvert "note"`. `bloque-utilisateur` demande une raison : ce qui attend l'utilisateur.
 6. **Traiter les résultats de sous-agents sans attendre la fin du tour.** Dès que l'étape en cours est finie : lis le résultat, vérifie-le, intègre-le, puis cite `[ctx C-NNNN]`. Jamais de fin de tour avec un résultat non traité sans le dire : si tu ne peux pas dans ce tour, dis à l'utilisateur lequel reste et pourquoi.
-7. **Avant de dire « c'est fini » ou « il ne reste que »** : `lister --projet P`, et réponds depuis cette liste.
+7. **Traiter un signalement de sous-agent dès qu'il est annoncé.** « Déjà fait » : vérifie dans le code ou l'historique ; si c'est exact, ferme la ligne par ta preuve `[ctx C-NNNN]`, sinon réponds-lui. « Bloqué » ou « question » : réponds-lui, il attend.
+8. **Avant de dire « c'est fini » ou « il ne reste que »** : `lister --projet P`, et réponds depuis cette liste. Une ligne « ouverte » n'est pas une ligne « pas faite » : c'est une ligne pas encore prouvée faite. Mesure avant de la refaire.
 
 ## Ce que tu ne fais jamais
 
 - Modifier à la main un fichier du dossier `contexte` : la garde refuse, et toute ligne effacée est restaurée.
 - Abandonner une ligne de ta propre initiative. `abandon --projet P C-NNNN "citation"` exige une citation exacte d'un message de l'utilisateur écrit APRÈS la création de la ligne : un contre-ordre. La demande d'origine ne suffit pas.
-- Laisser un sous-agent écrire dans la liste. Il rend son résultat, toi seul la mets à jour.
+- Laisser un sous-agent écrire dans la liste. Il peut la lire ; il rend son résultat, toi seul la mets à jour.
+
+## Si tu es un sous-agent
+
+Un hook te le dit : « Fichier contexte : tu es un sous-agent », avec le chemin de ta fiche et tes commandes.
+
+- Ta mission est celle de ton lancement, rien d'autre. Les messages de l'utilisateur, les « À trier » et les lignes ouvertes que tu lis dans la liste, ou dont tu as hérité, s'adressent à l'agent principal : ils ne te donnent aucun travail.
+- Si ta mission n'est pas dans ta fiche, recopie-la d'abord mot pour mot : `note --fiche <ID> --genre mission "..."`.
+- Note ton avancement dans ta fiche au fil du travail : `note --fiche <ID> "fait : ... ; reste : ..."`. Après un compactage de ton contexte, ta fiche t'est rendue : c'est elle qui fait foi, pas le résumé.
+- La liste de l'agent principal se lit (le fichier, `chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes entières), elle ne se modifie pas. Une lecture par commande simple, sans boucle ni script.
+- Tu constates qu'une ligne de la liste est déjà faite : tu ne la fermes pas, tu le signales avec sa preuve (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`). Bloqué, ou une question pour l'agent principal : `--genre bloque`, `--genre question`.
 
 ## Messages reçus pendant que tu travailles
 

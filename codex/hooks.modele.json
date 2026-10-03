@@ -58,7 +58,7 @@
           {
             "type": "command",
             "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Garde de la liste de travail"
           }
         ]
@@ -106,7 +106,7 @@
           {
             "type": "command",
             "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Liste de travail : réinjection après compactage"
           },
           {
@@ -124,7 +124,7 @@
           {
             "type": "command",
             "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Liste de travail : rappel de fin de tour"
           },
           {
@@ -148,7 +148,7 @@
           {
             "type": "command",
             "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Liste de travail : suivi du sous-agent"
           }
         ]
@@ -160,7 +160,7 @@
           {
             "type": "command",
             "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
-            "timeout": 10,
+            "timeout": 20,
             "statusMessage": "Liste de travail : fin de sous-agent"
           }
         ]

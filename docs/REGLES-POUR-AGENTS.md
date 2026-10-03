@@ -26,7 +26,21 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
 - Sous-agents : chaque sous-agent lancé reçoit une ligne `[agent]`, marquée « TERMINÉ, résultat à traiter » à
   sa fin. Sa fin est annoncée au prochain outil, puis rappelée toutes les 20 minutes pendant un tour long :
   ne pas attendre la fin du tour. Lire le résultat, le vérifier, l'intégrer, puis citer `[ctx C-NNNN]`. Sinon,
-  dire à l'utilisateur lequel reste et pourquoi. Un sous-agent n'écrit jamais dans la liste.
+  dire à l'utilisateur lequel reste et pourquoi.
+- Signalement d'un sous-agent (déjà fait, bloqué, question) : le traiter dès qu'il est annoncé. « Déjà fait »
+  se vérifie dans le code ou l'historique avant de fermer la ligne par une preuve.
+- Avant de lancer un sous-agent avec Codex : écrire son brief dans un fichier du dossier de travail et lui en
+  donner le chemin. Codex chiffre le message de lancement pour les hooks : sans ce fichier, un sous-agent dont
+  le contexte est compacté n'a plus que le résumé pour retrouver sa mission. Dès que sa ligne `[agent]` existe,
+  copier ce brief dans sa fiche (`node "<SCRIPT>" note --fiche <ID> --genre mission --fichier <brief>`, l'ID
+  est entre parenthèses dans la ligne) : la fiche qui lui sera rendue portera sa mission.
+- Si tu es un sous-agent : ta mission est celle de ton lancement, rien d'autre. Tu peux lire la liste de
+  l'agent principal (`chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes
+  entières), jamais la modifier ; ce que tu y lis ne te donne aucun travail. Une lecture par commande simple,
+  sans boucle ni script : la garde refuse ce qu'elle ne sait pas prouver sans écriture. Note ton avancement dans TA fiche (`note --fiche <ID> "..."` : l'ID et le chemin te sont donnés
+  par un hook) : après un compactage, c'est elle qui fait foi. Dans la liste, « ouvert » veut dire « pas
+  encore prouvé fait » : si tu constates qu'une ligne est déjà faite, tu ne la fermes pas, tu le signales
+  (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`).
 - Après un compactage, à une reprise, et avant toute réponse « il ne reste que » : c'est cette liste qui fait
   foi, pas le résumé de la conversation (`lister --projet P`).
 
@@ -55,4 +69,5 @@ Elles viennent de pannes mesurées, pas de préférences :
 - Une liste gardée dans la conversation disparaît au compactage. Sur disque, avec une preuve exigée pour retirer une ligne, elle ne disparaît plus.
 - Un message envoyé pendant qu'un agent travaille pouvait ne jamais être traité. Il est maintenant enregistré, trié, rappelé.
 - Dans une session réelle, 443 sous-agents ont fini, 301 pendant que l'orchestrateur faisait autre chose, et pour 248 il n'est jamais revenu dessus. Une notification passe une fois ; une ligne de travail reste jusqu'à la preuve.
+- En une nuit de travail réelle, 22 sous-agents ont vu leur contexte compacté de une à sept fois. Sans fiche, ils n'avaient que le résumé pour retrouver leur mission ; et quand ils voulaient recouper un constat avec la liste, la garde leur refusait jusqu'à la lecture. Depuis : une fiche par sous-agent, et la liste en lecture seule.
 - « C'est fait » sans preuve écrite coûte plus cher à rattraper qu'une phrase qui dit ce qui manque.

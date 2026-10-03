@@ -33,7 +33,7 @@ function depot(nom, fichiers) {
 
 test('dépôt propre : rien à signaler, les exemples admis passent', () => {
   const d = depot('propre', {
-    'README.md': 'Exemple : C:\\travail\\projet-demo, C:/Users/demo/.agent-memory-ledger, ~/.agent-memory-ledger\nContact : equipe@example.com\n',
+    'README.md': 'Exemple : C:\\travail\\projet-demo, C:/Users/demo/.agent-memory-ledger, ~/.agent-memory-ledger\nContact : equipe@example.com\nOutil : & \'C:\\Program Files\\Git\\usr\\bin\\wc.exe\' -l x\n',
     'src/a.js': "const horaire = /^\\d\\d:\\d\\d$/; // pas un chemin\nconst cle = process.env.API_KEY;\n",
     '.git/config': 'url = https://jeton-secret@exemple\n',
     'node_modules/x/index.js': 'C:' + '\\Users\\' + 'quelquun\\secret\n',
@@ -47,7 +47,7 @@ test('profil personnel, chemin absolu, adresse, clés, clé privée et secret en
   const jeton = 'gh' + 'p_' + 'a1B2'.repeat(9);
   const cleApi = 's' + 'k-' + 'Zx9'.repeat(8);
   const d = depot('sale', {
-    'a.md': 'Chemin : C:' + '\\Users\\' + 'marie' + '\\projets\\x\nAutre : /home/' + 'paul' + '/code\nDisque : D:' + '\\Archives\\2024\n',
+    'a.md': 'Chemin : C:' + '\\Users\\' + 'marie' + '\\projets\\x\nAutre : /home/' + 'paul' + '/code\nDisque : D:' + '\\Archives\\2024\nProgrammes : C:' + '\\ProgramData\\perso et C:' + '\\Program\\perso\n',
     'b.js': `const t = "${jeton}";\nconst k = '${cleApi}';\nconst MOT_DE_PASSE_${'PASSWORD'} = ${'"azerty123456"'};\n`,
     'c.txt': 'Écrire à ' + 'jean.dupont' + '@' + 'entreprise.fr' + '\n-----BEGIN RSA ' + 'PRIVATE KEY-----\n',
   });
@@ -58,6 +58,8 @@ test('profil personnel, chemin absolu, adresse, clés, clé privée et secret en
     /b\.js:1 : clé ou jeton/, /b\.js:2 : clé ou jeton/, /b\.js:3 : secret en clair/,
     /c\.txt:1 : adresse électronique/, /c\.txt:2 : clé privée/,
   ]) assert.match(r.out, attendu);
+  // Ligne 4 : « ProgramData » et « Program » suivi d'un sous-dossier, deux constats (seul « Program Files » est admis).
+  assert.equal((r.out.match(/a\.md:4 : chemin absolu Windows/g) || []).length, 2, r.out);
   assert.ok(!r.out.includes(jeton) && !r.out.includes(cleApi), 'un secret n\'est jamais affiché en entier');
   assert.match(r.out, /3 fichier\(s\) contrôlé\(s\).* constat\(s\)\./);
 });
@@ -92,6 +94,46 @@ test('termes privés : chaque occurrence est une erreur, y compris dans un nom d
   const dedans = controler(d, ['--termes', path.join(d, 'termes.txt')]);
   assert.equal(dedans.code, 2);
   assert.match(dedans.err, /DANS le dépôt/);
+});
+
+// Claude Code garde une installation sur la copie de la version installée tant que la chaîne « version » ne
+// change pas : constaté sur ce dépôt, trois correctifs poussés sans changer la version n'atteignaient personne.
+test('version du plugin : la même partout, et changée dès que le code publié change', () => {
+  const ecrire = (d, manifeste, place, paquet) => {
+    fs.writeFileSync(path.join(d, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'demo', version: manifeste }));
+    fs.writeFileSync(path.join(d, '.claude-plugin', 'marketplace.json'), JSON.stringify({ name: 'demo', plugins: [{ name: 'demo', source: './', version: place }] }));
+    fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: 'demo', version: paquet }));
+  };
+  const d = depot('version', { '.claude-plugin/plugin.json': '{}', 'scripts/a.js': 'console.log(1);\n', 'README.md': 'demo\n' });
+  ecrire(d, '1.0.0', '0.9.0', '1.0.1');
+  let r = controler(d);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /package\.json : version 1\.0\.1, le manifeste du plugin dit 1\.0\.0/);
+  assert.match(r.out, /marketplace\.json : version 0\.9\.0, le manifeste du plugin dit 1\.0\.0/);
+  ecrire(d, '1.0.0', '1.0.0', '1.0.0');
+  assert.equal(controler(d).code, 0, 'versions accordées, pas de dépôt git : rien à signaler');
+  // Publié sur une branche amont, puis le code change sans que la version change : signalé.
+  const git = (cwd, ...a) => {
+    const x = spawnSync('git', a, { cwd, encoding: 'utf8', windowsHide: true });
+    assert.equal(x.status, 0, `git ${a.join(' ')} : ${x.stderr}`);
+  };
+  const amont = path.join(RUN, 'version-amont.git');
+  fs.mkdirSync(amont, { recursive: true });
+  git(amont, 'init', '--bare', '-q');
+  git(d, 'init', '-q');
+  git(d, 'add', '-A');
+  git(d, '-c', 'user.name=banc', '-c', 'user.email=banc@example.com', 'commit', '-q', '-m', 'publication');
+  git(d, 'remote', 'add', 'origin', amont);
+  git(d, 'push', '-q', '-u', 'origin', 'HEAD');
+  assert.equal(controler(d).code, 0, 'rien n\'a changé depuis la publication');
+  fs.writeFileSync(path.join(d, 'README.md'), 'demo, documentation complétée\n');
+  assert.equal(controler(d).code, 0, 'la documentation seule ne demande pas de nouvelle version');
+  fs.writeFileSync(path.join(d, 'scripts', 'a.js'), 'console.log(2);\n');
+  r = controler(d);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /version : 1 fichier\(s\) du plugin ont changé depuis la dernière publication \(origin\/\S+\) mais la version est restée 1\.0\.0/);
+  ecrire(d, '1.1.0', '1.1.0', '1.1.0');
+  assert.equal(controler(d).code, 0, 'version changée : rien à signaler');
 });
 
 test('ce dépôt lui-même passe le contrôle', () => {

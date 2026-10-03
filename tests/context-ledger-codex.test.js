@@ -134,7 +134,9 @@ const maisonDe = d => path.join(d, '.agent-memory-ledger');
 const racineDe = d => path.join(maisonDe(d), 'contexte');
 
 function envPour(d) {
-  const env = Object.assign({}, process.env, { AGENT_MEMORY_LEDGER_HOME: maisonDe(d) });
+  // CONTEXT_LEDGER_BUDGET_MS : les bancs saturent eux-mêmes la machine (un processus par hook) ; le budget
+  // de temps réel d'un hook (8 s pour la fin de tour) n'est mesuré que par le test qui lui est dédié.
+  const env = Object.assign({ CONTEXT_LEDGER_BUDGET_MS: '600000' }, process.env, { AGENT_MEMORY_LEDGER_HOME: maisonDe(d) });
   delete env.CONTEXT_LEDGER_CODEX_HOOK;
   delete env.CONTEXT_LEDGER_EN_MUTATION;
   return env;
@@ -261,13 +263,16 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     assert.ok(!e || Object.keys(e.demandes).length === 0, 'aucun M ne doit être créé');
   });
 
-  test('sous-agent (agent_id ou agent_type seul) : rien enregistré, rien injecté', async () => {
+  test('sous-agent (agent_id ou agent_type seul) : rien enregistré, jamais la liste, sa consigne une seule fois', async () => {
     const d = dossier('sous-agent');
     const r1 = await hook(d, payload('UserPromptSubmit', { prompt: 'tâche', agent_id: 'a1', agent_type: 'worker' }));
     const r2 = await hook(d, payload('UserPromptSubmit', { prompt: 'tâche', agent_type: 'worker' }));
     const r3 = await hook(d, payload('PostToolUse', { agent_id: 'a1' }));
     const r4 = await hook(d, payload('PostCompact', { agent_id: 'a1' }));
-    assert.equal(r1.out + r2.out + r3.out + r4.out, '');
+    // Son démarrage n'a pas été vu : son premier événement lui donne sa consigne, pas la liste.
+    assert.ok(ctx(r1).startsWith('Fichier contexte : tu es un sous-agent. Ta fiche : '), ctx(r1).slice(0, 200));
+    assert.ok(!/Nouveau message M-|À trier :|Ouvert :/.test(ctx(r1)), 'ni message enregistré, ni liste');
+    assert.equal(r2.out + r3.out + r4.out, '');
     assert.equal(etat(d), null);
     assert.ok(!fs.existsSync(path.join(racineDe(d), '.sessions', 'reinject-codex-sess-a')), 'pas de drapeau pour un sous-agent');
   });
@@ -294,11 +299,18 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     }
   });
 
-  test('SubagentStart : rappel au sous-agent, conforme', async () => {
+  test('SubagentStart : consigne au sous-agent (sa fiche, sa mission seulement, liste en lecture), conforme', async () => {
     const d = dossier('subagent-start');
     const r = await hook(d, payload('SubagentStart'));
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'SubagentStart');
-    assert.match(ctx(r), /Seul l'orchestrateur écrit dans le fichier contexte/);
+    const c = ctx(r);
+    assert.match(c, /^Fichier contexte : tu es un sous-agent \(ligne C-\d{4} de l'orchestrateur\)\. Ta fiche : /);
+    // Codex 0.155 : le message de lancement est chiffré, le hook ne peut pas copier la mission.
+    assert.match(c, /Ta mission n'a pas pu y être copiée automatiquement : commence par la recopier mot pour mot avec `node ".+context-ledger\.js" note --fiche ag-1 --genre mission "\.\.\."`/);
+    assert.match(c, /\nTa mission est celle de ton lancement, rien d'autre : .+ ils ne te donnent aucun travail\.\n/);
+    assert.match(c, /elle ne se modifie pas : ajouter, etat, sans-travail et abandon lui sont réservés\./);
+    assert.match(c, /--genre deja-fait "C-NNNN : la preuve"/);
+    assert.ok(c.length <= PLAFOND);
   });
 
   test('CLI ajouter --de M : C lié à M, M converti', async () => {
@@ -510,6 +522,24 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     assert.equal((await hook(d, payload('Stop', { turn_id: 't3', last_assistant_message: `Reste ${c3}.` }))).out, '');
   });
 
+  // Constaté dans une session réelle de Codex : « Fichier contexte : rappel de fin de tour, hook timed out
+  // after 10s ». Un hook tué ne rend rien. Mesuré : au repos ce hook prend moins d'une seconde ; sous forte
+  // charge le démarrage de node mange le délai. Quand le budget est épuisé, le rappel sort quand même et les
+  // mises à jour qui le précèdent (preuves, fins de sous-agents) attendent le prochain événement.
+  test('Stop Codex : budget de temps épuisé -> le rappel sort quand même, les mises à jour attendent le prochain événement', async () => {
+    const d = dossier('stop-budget');
+    const { c } = await preparer(d, 'vieille demande ouverte', HOOK, 't1');
+    const r = await hook(d, payload('UserPromptSubmit', { prompt: 'second message, pas encore trié', turn_id: 't2' }));
+    const m2 = nouveauM(r);
+    ecrirePreuve(d, 'infra.codex.md', [`- vieille demande faite [ctx ${c}]`]);
+    const s = await hook(d, payload('Stop', { turn_id: 't2', last_assistant_message: 'fini' }), HOOK, { CONTEXT_LEDGER_BUDGET_MS: '1' });
+    assert.equal(s.json.decision, 'block', 'le rappel de fin de tour sort, budget épuisé ou non');
+    assert.ok(s.json.reason.includes(m2), s.json.reason.slice(0, 300));
+    assert.equal(etat(d).lignes[c].statut, 'ouvert', 'la preuve n\'a pas été cherchée : plus de temps');
+    await hook(d, payload('PostToolUse'));
+    assert.equal(etat(d).lignes[c].statut, 'fait', 'elle l\'est à l\'événement suivant');
+  });
+
   test('CLI sous charge : verrou du fichier contexte tenu 7,5 s (> 3 s du noyau) -> ajouter réussit quand même', async () => {
     const d = dossier('cli-verrou');
     const a0 = await cli(d, ['ajouter', '--projet', PROJET, 'ligne témoin']);
@@ -606,6 +636,10 @@ function rolloutEnfant(d, fil, { chemin, surnom, role, profondeur = 1 }) {
   return f;
 }
 
+// Ce que Codex écrit dans le rollout du sous-agent quand le texte d'un hook lui parvient (forme relevée dans
+// 11 rollouts réels le 2026-10-02 : response_item, message du rôle developer).
+const consigneEcrite = texte => JSON.stringify({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: texte }] } }) + '\n';
+
 function rolloutParent(d) {
   const f = path.join(d, 'rollout-parent.jsonl');
   fs.writeFileSync(f, JSON.stringify({ timestamp: '2026-09-27T23:00:00.000Z', ordinal: 0, type: 'session_meta', payload: { session_id: 'sess-a', id: 'sess-a', source: 'vscode' } }) + '\n');
@@ -637,7 +671,7 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     await tourTrie(d, parent, 't1', 'lance deux agents');
     await attendreBase(d);
     const r1 = await hook(d, payload('SubagentStart', { agent_id: 'th-1', agent_type: 'worker', transcript_path: e1 }));
-    assert.match(ctx(r1), /Seul l'orchestrateur écrit dans le fichier contexte/);
+    assert.match(ctx(r1), /^Fichier contexte : tu es un sous-agent \(ligne C-\d{4} de l'orchestrateur\)\. Ta fiche : /);
     await hook(d, payload('SubagentStart', { agent_id: 'th-2', agent_type: 'code-reviewer', transcript_path: e2 }));
     await hook(d, payload('SubagentStart', { agent_id: 'th-1', agent_type: 'worker', transcript_path: e1 })); // second démarrage du même fil
     await hook(d, payload('SubagentStart', { agent_id: 'th-3', agent_type: 'worker', transcript_path: e3 })); // lancé par un sous-agent
@@ -726,6 +760,116 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     assert.match(e.lignes[c3].note, /^TERMINÉ/);
   });
 
+  // Fiches des sous-agents. Mesuré la même nuit dans 24 rollouts : les 22
+  // sous-agents Codex ont été compactés 1 à 7 fois, sans rien pour retrouver leur mission. Formes réelles :
+  // un événement d'outil d'un sous-agent porte agent_id et, en transcript_path, SON rollout ; un compactage
+  // y est écrit en ligne { timestamp, ordinal, type: 'compacted', payload }.
+  test('sous-agents : fiche créée au démarrage, mission recopiée par le sous-agent, fiche rendue après le compactage de SON rollout, signalement dit à l\'orchestrateur', async () => {
+    const d = dossier('fiches');
+    const parent = rolloutParent(d);
+    const e1 = rolloutEnfant(d, 'th-6', { chemin: '/root/p1_a3', surnom: 'Banach', role: 'default' });
+    await tourTrie(d, parent, 't1', 'lance un agent');
+    await attendreBase(d);
+    const sa = { agent_id: 'th-6', agent_type: 'default' };
+    const debut = await hook(d, payload('SubagentStart', Object.assign({ transcript_path: e1 }, sa)));
+    assert.match(ctx(debut), /note --fiche th-6 --genre mission/);
+    fs.appendFileSync(e1, consigneEcrite(ctx(debut)));
+    const index = () => JSON.parse(fs.readFileSync(path.join(racineDe(d), '.fiches', 'codex-th-6.json'), 'utf8'));
+    const [c1] = Object.keys(etat(d).lignes);
+    assert.equal(index().ligne, c1);
+    assert.equal(index().mission, false);
+    assert.equal(index().titre, 'p1_a3 (Banach)');
+    const fiche = () => fs.readFileSync(index().fiche, 'utf8');
+    assert.ok(fiche().includes('- ID de travail : th-6 (default)'));
+    assert.ok(fiche().includes(`- Ligne de suivi dans la liste de l'orchestrateur : ${c1} (lecture seule pour le sous-agent)`));
+    // Le sous-agent recopie sa mission, puis note son avancement.
+    assert.equal((await cli(d, ['note', '--fiche', 'th-6', '--genre', 'mission', 'Relire A3 ligne à ligne, sans modifier le dépôt.'])).code, 0);
+    assert.equal((await cli(d, ['note', '--fiche', 'th-6', 'A3 : 300 lignes lues sur 900'])).code, 0);
+    assert.ok(fiche().includes('## Mission (mot pour mot)\n\nRelire A3 ligne à ligne, sans modifier le dépôt.\n'));
+    assert.equal(index().mission, true);
+    // Outil du sous-agent : rien tant que son rollout n'a pas de compactage (premier passage : base).
+    const outil = () => hook(d, payload('PostToolUse', Object.assign({ transcript_path: e1 }, sa)));
+    assert.equal((await outil()).out, '');
+    fs.appendFileSync(e1, JSON.stringify({ timestamp: new Date().toISOString(), ordinal: 464, type: 'compacted', payload: { message: '', replacement_history: [] } }) + '\n');
+    const reprise = ctx(await outil());
+    assert.ok(reprise.startsWith('Fichier contexte : ton contexte de sous-agent vient d\'être compacté. Voici ta fiche ('), reprise.slice(0, 200));
+    assert.ok(reprise.includes('Relire A3 ligne à ligne, sans modifier le dépôt.'));
+    assert.ok(reprise.includes('| A3 : 300 lignes lues sur 900'));
+    assert.ok(!/À trier :|Ouvert :/.test(reprise), 'jamais la liste de l\'orchestrateur');
+    assert.equal((await outil()).out, '', 'une seule reprise pour ce compactage');
+    // Plus tard, un autre compactage, annoncé par son événement (PostCompact porte agent_id : 7 événements
+    // réels le 2026-10-02) : rien ne peut être injecté à ce moment, la fiche est rendue au prochain outil.
+    const fIndex = path.join(racineDe(d), '.fiches', 'codex-th-6.json');
+    const i2 = index();
+    i2.repriseLe = new Date(Date.now() - 20 * 60000).toISOString();
+    fs.writeFileSync(fIndex, JSON.stringify(i2));
+    assert.equal((await hook(d, payload('PostCompact', Object.assign({ trigger: 'auto', transcript_path: e1 }, sa)))).out, '');
+    assert.ok(ctx(await outil()).startsWith('Fichier contexte : ton contexte de sous-agent vient d\'être compacté.'));
+    assert.equal(index().reprises, 2);
+    assert.equal((await outil()).out, '');
+    // Message de l'orchestrateur reçu par le sous-agent (UserPromptSubmit porte agent_id) : pas un message de l'utilisateur.
+    const avant = Object.keys(etat(d).demandes).length;
+    assert.equal((await hook(d, payload('UserPromptSubmit', Object.assign({ prompt: 'suite de la tâche', transcript_path: e1 }, sa)))).out, '');
+    assert.equal(Object.keys(etat(d).demandes).length, avant);
+    // Il constate qu'une ligne de la liste est déjà faite : il le signale, l'orchestrateur le lit à son prochain outil.
+    assert.equal((await cli(d, ['note', '--fiche', 'th-6', '--genre', 'deja-fait', `${c1} : déjà corrigé par le commit abc1234`])).code, 0);
+    const o = ctx(await hook(d, payload('PostToolUse', { transcript_path: parent })));
+    assert.ok(o.startsWith(`Signalement du sous-agent ${c1} « p1_a3 (Banach) » (deja-fait) : « ${c1} : déjà corrigé par le commit abc1234 ». Vérifie dans le code ou l'historique`), o.slice(0, 300));
+    assert.equal((await hook(d, payload('PostToolUse', { transcript_path: parent }))).out, '');
+  });
+
+  // Mesuré le 2026-10-02 dans 24 rollouts réels : la consigne du démarrage n'est arrivée qu'à 2 sous-agents sur
+  // 22 (hook SubagentStart tué par son délai, ou jamais déclenché). Filet : le premier événement du sous-agent
+  // la donne, une seule fois.
+  test('sous-agents : consigne donnée au premier outil quand le démarrage ne l\'a pas donnée, une seule fois', async () => {
+    const d = dossier('consigne-filet');
+    const parent = rolloutParent(d);
+    const e1 = rolloutEnfant(d, 'th-8', { chemin: '/root/lecture_noyau', surnom: 'Kepler', role: 'default' });
+    await tourTrie(d, parent, 't1', 'lance deux agents');
+    await attendreBase(d);
+    const sa = { agent_id: 'th-8', agent_type: 'default' };
+    const outil = () => hook(d, payload('PostToolUse', Object.assign({ transcript_path: e1 }, sa)));
+    const c = ctx(await outil());
+    assert.ok(c.startsWith('Fichier contexte : tu es un sous-agent. Ta fiche : '), c.slice(0, 200));
+    assert.match(c, /note --fiche th-8 --genre mission/);
+    assert.match(c, /\nTa mission est celle de ton lancement, rien d'autre : /);
+    assert.ok(!/À trier :|Ouvert :/.test(c), 'jamais la liste de l\'orchestrateur');
+    fs.appendFileSync(e1, consigneEcrite(c));
+    assert.equal((await outil()).out, '', 'la consigne n\'est donnée qu\'une fois');
+    // Démarrage vu : la consigne a été donnée là (et écrite dans son rollout), son premier outil ne la redit pas.
+    const e2 = rolloutEnfant(d, 'th-10', { chemin: '/root/lecture_android', surnom: 'Hubble', role: 'default' });
+    const sb = { agent_id: 'th-10', agent_type: 'default' };
+    const debut = ctx(await hook(d, payload('SubagentStart', Object.assign({ transcript_path: e2 }, sb))));
+    assert.match(debut, /^Fichier contexte : tu es un sous-agent \(ligne C-\d{4} de l'orchestrateur\)\. Ta fiche : /);
+    fs.appendFileSync(e2, consigneEcrite(debut));
+    assert.equal((await hook(d, payload('PostToolUse', Object.assign({ transcript_path: e2 }, sb)))).out, '');
+  });
+
+  // Constaté le 2026-10-02 dans un rollout réel : le hook de démarrage a posé sa marque puis Codex l'a tué à
+  // son délai de 5 s, sortie jetée ; le filet ne redonnait rien puisque la marque était posée.
+  test('sous-agents : consigne marquée au démarrage mais absente de son rollout : redonnée au premier outil, une fois', async () => {
+    const d = dossier('consigne-absente');
+    const parent = rolloutParent(d);
+    await tourTrie(d, parent, 't1', 'lance deux agents');
+    await attendreBase(d);
+    const outil = (e, sa) => hook(d, payload('PostToolUse', Object.assign({ transcript_path: e }, sa)));
+    // Sortie du démarrage jetée : rien dans son rollout, la consigne est redonnée au premier outil, une fois.
+    const e1 = rolloutEnfant(d, 'th-11', { chemin: '/root/relecture_lot', surnom: 'Bohr', role: 'default' });
+    const sa = { agent_id: 'th-11', agent_type: 'default' };
+    await hook(d, payload('SubagentStart', Object.assign({ transcript_path: e1 }, sa)));
+    const c = ctx(await outil(e1, sa));
+    assert.ok(c.startsWith('Fichier contexte : tu es un sous-agent (ligne C-'), c.slice(0, 200));
+    assert.match(c, /note --fiche th-11 /);
+    fs.appendFileSync(e1, consigneEcrite(c));
+    assert.equal((await outil(e1, sa)).out, '', 'redonnée une seule fois');
+    // Consigne d'un autre sous-agent dans son rollout (fork qui hérite de l'historique) : ne compte pas.
+    const e2 = rolloutEnfant(d, 'th-12', { chemin: '/root/relecture_lot/suite', surnom: 'Born', role: 'default', profondeur: 2 });
+    const sb = { agent_id: 'th-12', agent_type: 'default' };
+    await hook(d, payload('SubagentStart', Object.assign({ transcript_path: e2 }, sb)));
+    fs.appendFileSync(e2, consigneEcrite(c));
+    assert.match(ctx(await outil(e2, sb)), /note --fiche th-12 /);
+  });
+
   // Trou trouvé dans une session réelle de Claude Code (un tour de plus de 4 heures, 7 résultats sans
   // rappel) : le noyau est commun, le même suivi en cours de tour est branché ici.
   test('sous-agents : tour long sans fin de tour -> fin annoncée une fois au prochain outil, puis rappel passé le délai, jusqu\'à la preuve', async () => {
@@ -808,16 +952,47 @@ describe('garde PreToolUse (Codex)', CONCURRENCE, () => {
     assert.equal((await hook(d, payload('PreToolUse', { tool_name: 'exec', tool_input: { code: 'await tools.exec_command({ cmd: "git status" })' } }))).out, '');
   });
 
-  test('garde : sous-agent qui appelle la CLI -> deny ; orchestrateur -> autorisé', async () => {
+  // Règle : un sous-agent n'ÉCRIT jamais dans la liste de travail. La garde lui refusait aussi la lecture :
+  // 19 refus dans 7 sous-agents Codex d'une session réelle, tous pour lire la liste ou le texte intégral
+  // d'une ligne. Les commandes ci-dessous sont les formes relevées dans leurs rollouts.
+  test('garde : sous-agent : écriture et commandes d\'écriture de la CLI -> deny ; lecture de la racine -> autorisée ; orchestrateur -> autorisé', async () => {
     const d = dossier('garde-cli');
-    const appel = `node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js" ajouter --projet ${PROJET} "x"`;
-    const r1 = await hook(d, payload('PreToolUse', { tool_name: 'Bash', tool_input: { command: appel }, agent_id: 'a1', agent_type: 'worker' }));
-    assert.match(r1.json.hookSpecificOutput.permissionDecisionReason, /Seul l'orchestrateur/);
+    const S = 'node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js"';
+    const appel = `${S} ajouter --projet ${PROJET} "x"`;
+    const sa = { agent_id: 'a1', agent_type: 'worker' };
+    const garde = (command, qui) => hook(d, payload('PreToolUse', Object.assign({ tool_name: 'Bash', tool_input: { command } }, qui || {})));
+    const r1 = await garde(appel, sa);
+    assert.match(r1.json.hookSpecificOutput.permissionDecisionReason, /^Seul l'orchestrateur écrit dans le fichier contexte\. Toi, sous-agent, tu peux le LIRE/);
     const r2 = await hook(d, payload('PreToolUse', { tool_name: 'exec', tool_input: { code: `await tools.exec_command({ cmd: ${JSON.stringify(appel)} })` }, agent_type: 'worker' }));
     assert.equal(r2.json.hookSpecificOutput.permissionDecision, 'deny');
-    assert.equal((await hook(d, payload('PreToolUse', { tool_name: 'Bash', tool_input: { command: appel } }))).out, '');
-    const r3 = await hook(d, payload('PreToolUse', { tool_name: 'Bash', tool_input: { command: `cat ${R(d)}/x.md` }, agent_id: 'a1' }));
-    assert.equal(r3.json.hookSpecificOutput.permissionDecision, 'deny');
+    assert.equal((await garde(appel)).out, '', 'l\'orchestrateur appelle la CLI');
+    const W = R(d).replace(/\//g, '\\');
+    for (const cmd of [
+      `Set-Content -LiteralPath '${W}\\projet-demo.claude.md' -Value x`,
+      `$p='${W}\\x.md'; Remove-Item $p`,
+      `Get-Content '${W}\\x.md' | Out-File '${W}\\y.md'`,
+      `Get-ChildItem '${W}' | ForEach-Object { Remove-Item $_ }`,
+      `Get-ChildItem '${W}' | ForEach-Object Delete`,
+      `echo x > ${R(d)}/x.md`,
+      `${S} etat --projet ${PROJET} C-0001 ouvert`,
+      `cat ${R(d)}/x.md; ${S} ajouter --projet ${PROJET} "y"`,
+      `${S} note --fiche a2 "dans la fiche d'un autre"`,
+    ]) {
+      const r = await garde(cmd, sa);
+      assert.equal(r.json && r.json.hookSpecificOutput.permissionDecision, 'deny', `devait refuser : ${cmd}`);
+    }
+    for (const cmd of [
+      `cat ${R(d)}/x.md`,
+      `$p='${W}\\projet-demo.claude.md'; Get-Content -LiteralPath $p -TotalCount 4`,
+      `$root='${W}\\projet-demo.claude.md'; Select-String -LiteralPath $root -Pattern 'LGPL|fpdf2' | Select-Object -First 50`,
+      `rg -n -i -l --glob 'C-*.txt' 'domain_tlds' '${W}\\projet-demo.claude'`,
+      `Get-Content -LiteralPath '${W}\\projet-demo.claude\\C-0297.txt'`,
+      `Select-String -Path '${W}\\projet-demo.claude.md' -Pattern 'References legales' -SimpleMatch`,
+      `Get-Content -LiteralPath '${W}\\projet-demo.claude.md' | Select-String 'C-0461' | ForEach-Object { $_.Line }`,
+      `${S} chercher --agent claude --projet projet-demo "domain_tlds"`,
+      `${S} lister --projet ${PROJET}`,
+      `${S} note --fiche a1 "fait : lots B01 à B05 lus"`,
+    ]) assert.equal((await garde(cmd, sa)).out, '', `devait permettre : ${cmd}`);
   });
 
   test('garde : stdin illisible visant la racine -> deny conforme', async () => {
@@ -895,6 +1070,11 @@ const MUTATIONS = [
   { nom: 'stop-livraisons', motif: '^sous-agents', transformer: s => s.replace(/const livraisons = core\.texteLivraisons\([^\n]*\/\/ ancre-mutation:stop-livraisons/, "const livraisons = ''; // mutation") },
   { nom: 'filet-rollout', motif: '^sous-agents', transformer: s => s.replace('if (!r) return fins; // ancre-mutation:filet-rollout', 'return fins; // mutation') },
   { nom: 'suivi-en-cours', motif: '^sous-agents', transformer: s => s.replace(/try \{ return core\.texteSuiviEnCours\([^\n]*\/\/ ancre-mutation:suivi-en-cours/, "return ''; // mutation") },
+  { nom: 'reprise-sous-agent', motif: '^sous-agents : fiche', transformer: s => s.replace(/if \(compacte\) \{ contexte\([^\n]*\/\/ ancre-mutation:reprise-sous-agent/, '// mutation') },
+  { nom: 'consigne-filet', motif: '^sous-agents : consigne', transformer: s => s.replace(/if \(!index\.reprises && !index\.consigneVerifieeLe[^\n]*\/\/ ancre-mutation:consigne-filet/, '// mutation') },
+  // Sans le transcript, la consigne marquée mais perdue n'est plus redonnée.
+  { nom: 'consigne-transcript', motif: '^sous-agents : consigne marquée', transformer: s => s.replace(/fichier: input\.transcript_path, formes: \['"role":"developer"'\] \}\)\) contexte\(evenement/, "formes: ['\"role\":\"developer\"'] })) contexte(evenement") },
+  { nom: 'stop-budget', motif: '^Stop Codex : budget', transformer: s => s.replace(/const sIlResteDuTemps = [^\n]*\/\/ ancre-mutation:stop-budget/, 'const sIlResteDuTemps = fn => { try { fn(); } catch (_) { /* mutation */ } };') },
   { nom: 'reconciliateur', motif: 'preuve par contenu|réconciliateur|CRLF', transformer: s => s.replace(/const r = core\.reconcilier\(\{ agent: AGENT, base: basePreuves\(\) \}\);/, 'const r = { faits: [], partiels: [], ignores: [], projets: [] };') },
 ];
 

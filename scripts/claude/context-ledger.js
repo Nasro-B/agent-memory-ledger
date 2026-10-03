@@ -4,11 +4,15 @@
 // + point d'entrée de la CLI. Noyau : ../lib/context-ledger-core.js (API documentée en tête).
 //
 // Hooks (Claude Code 2.1.284) : UserPromptSubmit, SessionStart, PostToolUse (fichiers, commits, lancement
-// d'un sous-agent ou d'un workflow), PreToolUse (garde), Stop, SubagentStop (fin d'un sous-agent).
+// d'un sous-agent ou d'un workflow), PreToolUse (garde), Stop, SubagentStart (fiche du sous-agent),
+// SubagentStop (fin d'un sous-agent), PostCompact (compactage d'un sous-agent).
 // Sortie vers le modèle : UNIQUEMENT hookSpecificOutput.additionalContext (<= 9 000 caractères) ; le
 // systemMessage d'un hook synchrone n'atteint jamais le modèle.
-// Première garde des événements : input.agent_id (sous-agent) -> rien, exit 0. Exceptions : la garde
-// PreToolUse, qui refuse aussi pour un sous-agent, et SubagentStop, qui porte l'agent_id du sous-agent fini.
+// Événement venu d'un sous-agent (agent_id, ou transcript rangé sous « subagents ») : jamais la liste ni
+// les messages de l'orchestrateur. Il reçoit sa consigne et le chemin de sa fiche à son démarrage (redonnés à
+// son premier outil si son transcript ne les contient pas), puis sa fiche après un compactage de son
+// contexte. La garde PreToolUse lui laisse la lecture de la liste et lui
+// refuse toute écriture, sauf une note dans sa propre fiche. SubagentStop porte l'agent_id du sous-agent fini.
 // Toute erreur interne : silence et exit 0 (un hook qui plante ne doit jamais bloquer l'utilisateur),
 // sauf la garde PreToolUse qui refuse si l'appel vise la racine contexte ou la CLI.
 //
@@ -210,7 +214,8 @@ function tacheLancee(input) {
   if (typeof tr === 'string') { try { tr = JSON.parse(tr); } catch (_) { tr = {}; } }
   if (!tr || typeof tr !== 'object') return null;
   if (input.tool_name === 'Agent' && tr.agentId && (tr.isAsync || tr.status === 'async_launched')) {
-    return { id: String(tr.agentId), genre: ti.subagent_type || 'agent', titre: String(ti.description || tr.description || 'sans titre'), resultat: String(tr.outputFile || '') };
+    // mission : le brief mot pour mot (tool_input.prompt), copié dans la fiche du sous-agent.
+    return { id: String(tr.agentId), genre: ti.subagent_type || 'agent', titre: String(ti.description || tr.description || 'sans titre'), resultat: String(tr.outputFile || ''), mission: typeof ti.prompt === 'string' ? ti.prompt : '' };
   }
   if (input.tool_name === 'Workflow' && tr.taskId && tr.status === 'async_launched') {
     return { id: String(tr.taskId), genre: 'workflow', titre: String(tr.workflowName || tr.summary || 'sans titre'), resultat: String(tr.transcriptDir || '') };
@@ -443,6 +448,102 @@ function surSubagentStop(input) {
   marquerFin(input, String(input.agent_id), 'terminé', true);
 }
 
+// ---------------------------------------------------------------------------
+// Sous-agents : leur fiche. Le noyau tient les fiches ; ici, seulement les
+// formes propres à Claude Code. Mesuré dans 372 transcripts de sous-agents : les événements d'outils d'un
+// sous-agent portent agent_id ; SessionStart après SON compactage ne le porte pas toujours, d'où la
+// reconnaissance par le chemin du transcript (dossier « subagents »).
+
+// ID du sous-agent qui a déclenché l'événement, ou '' pour l'orchestrateur.
+function idSousAgent(input) {
+  if (input.agent_id) return String(input.agent_id);
+  if (core.transcriptDUnSousAgent(input.transcript_path, input.session_id, AGENT)) return core.idDepuisTranscript(input.transcript_path) || 'inconnu'; // ancre-mutation:sous-agent-par-transcript
+  return '';
+}
+
+// Transcript du sous-agent : donné par l'événement, ou déduit de celui de la session
+// (<dossier>/<session>/subagents/agent-<id>.jsonl, forme relevée dans Claude Code 2.1.284).
+function transcriptSousAgent(input, id) {
+  if (typeof input.agent_transcript_path === 'string' && input.agent_transcript_path) return input.agent_transcript_path;
+  const tp = typeof input.transcript_path === 'string' ? input.transcript_path : '';
+  if (!tp) return '';
+  if (core.transcriptDUnSousAgent(tp, input.session_id, AGENT)) return tp;
+  return require('path').join(tp.replace(/\.jsonl$/i, ''), 'subagents', `agent-${id}.jsonl`);
+}
+
+// Mission d'un sous-agent : le premier message de son transcript (son brief, mot pour mot), sinon ''.
+function missionDepuisTranscript(fichier) {
+  if (!fichier) return '';
+  const fs = require('fs');
+  let debut = '';
+  try {
+    const fd = fs.openSync(fichier, 'r');
+    try { const b = Buffer.alloc(262144); debut = b.toString('utf8', 0, fs.readSync(fd, b, 0, b.length, 0)); } finally { fs.closeSync(fd); }
+  } catch (_) { return ''; }
+  const fin = debut.indexOf('\n');
+  if (fin < 0) return ''; // première ligne plus longue que le tampon, ou pas encore écrite en entier
+  let o;
+  try { o = JSON.parse(debut.slice(0, fin)); } catch (_) { return ''; }
+  const c = o && o.type === 'user' && o.message ? o.message.content : null;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.map(x => (x && x.type === 'text' && typeof x.text === 'string' ? x.text : '')).join('\n').trim();
+  return '';
+}
+
+// Fiche du sous-agent : créée si elle manque, complétée si sa mission manque. Retourne son index ou null.
+function assurerFiche(input, id) {
+  let index = core.lireIndexFiche(AGENT, id);
+  if (index && index.mission) return index;
+  const mission = missionDepuisTranscript(transcriptSousAgent(input, id));
+  if (!index || mission) {
+    // Sous-agent déjà suivi par l'orchestrateur (ligne [agent]) : la fiche reprend sa ligne et son titre.
+    let suivi = null;
+    try { const s = core.lireSession(AGENT, input.session_id); suivi = s && s.taches ? s.taches[id] : null; } catch (_) { suivi = null; }
+    const projet = index ? index.projet : (suivi && suivi.projet) || core.projetDeSession(AGENT, input.session_id, input.cwd);
+    // Titre de repli quand ni l'orchestrateur ni la fiche n'en ont : remplacé dès que le vrai titre arrive.
+    const titre = (suivi && suivi.titre) || (index && !index.titreRepli ? index.titre : '');
+    core.creerFiche({
+      agent: AGENT, sessionId: input.session_id, id, projet, mission, cwd: input.cwd, ligne: suivi ? suivi.ligne : null,
+      titre: titre || (index ? index.titre : `sous-agent ${input.agent_type || ''}`.trim()), titreRepli: !titre,
+      genre: (suivi && suivi.genre) || input.agent_type || 'agent',
+    });
+    index = core.lireIndexFiche(AGENT, id);
+  }
+  return index;
+}
+
+// Démarrage d'un sous-agent : sa fiche existe avant son premier outil, et il sait où elle est.
+function surSubagentStart(input) {
+  const id = idSousAgent(input);
+  if (!id || id === 'inconnu') return;
+  try { assurerFiche(input, id); } catch (_) { /* la consigne part quand même, sans fiche */ }
+  sortir('SubagentStart', core.texteConsigneSousAgent({ agent: AGENT, id, script: SCRIPT }));
+  try { core.consigneADonner({ agent: AGENT, id }); } catch (_) { /* au pire, redite à son premier outil */ }
+}
+
+// Événement venu d'un sous-agent. Jamais la liste de l'orchestrateur (défaut mesuré le 2026-10-02 : elle
+// lui était injectée après son compactage) : sa fiche, rendue quand son contexte vient d'être compacté.
+function surEvenementSousAgent(input, id) {
+  const evenement = input.hook_event_name;
+  if (id === 'inconnu' || !['SessionStart', 'PostToolUse', 'UserPromptSubmit', 'PostCompact'].includes(evenement)) return;
+  let index = null;
+  try { index = assurerFiche(input, id); } catch (_) { index = null; }
+  if (!index) return;
+  // PostCompact ne peut rien injecter : le compactage est noté, la fiche sera rendue au prochain outil.
+  if (evenement === 'PostCompact') { core.noterCompactage({ agent: AGENT, id }); return; }
+  let compacte = false;
+  try {
+    compacte = core.compactageDuSousAgent({
+      agent: AGENT, id, fichier: transcriptSousAgent(input, id), motifs: ['"subtype":"compact_boundary"'],
+      annonce: evenement === 'SessionStart' && input.source === 'compact',
+    });
+  } catch (_) { compacte = false; }
+  if (compacte) { sortir(evenement, core.texteRepriseSousAgent({ agent: AGENT, id, script: SCRIPT })); return; } // ancre-mutation:reprise-sous-agent
+  // Consigne jamais donnée (démarrage du sous-agent non vu), ou marquée mais absente de son transcript (hook de
+  // démarrage tué après sa marque) : donnée ici, une fois. La consigne injectée s'y écrit en hook_additional_context.
+  if (!index.reprises && !index.consigneVerifieeLe && core.consigneADonner({ agent: AGENT, id, fichier: transcriptSousAgent(input, id), formes: ['"type":"hook_additional_context"'] })) sortir(evenement, core.texteConsigneSousAgent({ agent: AGENT, id, script: SCRIPT })); // ancre-mutation:consigne-filet
+}
+
 // generique : les outils hors Write/Edit/Bash/PowerShell (MCP Windows-MCP FileSystem ou MultiEdit,
 // desktop-commander...) sont refusés dès que leur tool_input vise la racine contexte.
 function surPreToolUse(input) {
@@ -459,7 +560,10 @@ function executerHook(brut) {
     return;
   }
   if (!input || typeof input !== 'object') return;
+  try { core.capturerEvenement({ agent: AGENT, input, octets: String(brut).length }); } catch (_) { /* diagnostic seulement */ }
   const evenement = input.hook_event_name;
+  // Budget de temps, démarrage de node compris : sous le délai de hooks/hooks.json (30 s ; SessionStart 20 s).
+  core.fixerBudget(evenement === 'SessionStart' ? 16000 : 25000);
   if (evenement === 'PreToolUse') {
     try { surPreToolUse(input); } catch (_) {
       if (core.texteToucheRacine(brut) || /context-ledger/i.test(brut)) refuser(core.RAISON_FICHIER);
@@ -470,8 +574,11 @@ function executerHook(brut) {
     if (AGENT) { try { surSubagentStop(input); } catch (_) { /* la notification du transcript sert de filet */ } }
     return;
   }
-  if (input.agent_id) return; // sous-agent : rien
   if (!AGENT) return;
+  if (evenement === 'SubagentStart') { try { surSubagentStart(input); } catch (_) { /* silence */ } return; }
+  // Sous-agent : jamais la liste ni les messages de l'orchestrateur, seulement sa propre fiche.
+  const sousAgent = idSousAgent(input);
+  if (sousAgent) { try { surEvenementSousAgent(input, sousAgent); } catch (_) { /* silence */ } return; }
   try {
     if (evenement === 'UserPromptSubmit') surUserPromptSubmit(input);
     else if (evenement === 'SessionStart') surSessionStart(input);

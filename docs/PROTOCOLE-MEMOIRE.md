@@ -9,6 +9,7 @@ La maison est le dossier `~/.agent-memory-ledger` (ou celui de la variable `AGEN
 | Système | Fichier | Rôle | Qui écrit |
 | --- | --- | --- | --- |
 | Liste de travail | `contexte/<projet>.<agent>.md` | ce qui reste à faire, mot pour mot | les hooks et la commande `context-ledger`, jamais à la main |
+| Fiche d'un sous-agent | `contexte/<projet>.<agent>/fiches/<genre>-<identifiant>.md` | sa mission mot pour mot, puis ses notes | le hook la crée ; le sous-agent y ajoute ses notes (commande `note`), rien d'autre |
 | Journal détaillé | `history/<projet>.<agent>.md` | une entrée par travail fait, la plus récente en haut | chaque agent dans SON fichier |
 | Résumé commun | `Memory-Auto.md` | une ligne par événement, sous `### <projet>` | tous les agents, chacun ses lignes |
 | Règles du projet | `history/<projet>.rules.md` | réflexes à appliquer en priorité | l'utilisateur ou l'agent, à la main |
@@ -26,6 +27,9 @@ Après un compactage, ou à une reprise, c'est la liste de travail qui dit ce qu
 - Chaque message de l'utilisateur est enregistré mot pour mot dans la liste de travail (`M-NNNN`). Avant d'agir, le transformer en lignes de travail (`ajouter --de M-NNNN`), une ligne par travail demandé, ou le classer `sans-travail` avec sa raison.
 - Un problème trouvé en route et suivi nulle part s'inscrit aussi (`ajouter` sans `--de`).
 - Un sous-agent lancé reçoit une ligne `[agent]`. À sa fin, la ligne passe à « TERMINÉ, résultat à traiter » : lire le résultat, le vérifier, l'intégrer. Sa fin est annoncée à l'agent principal à son prochain outil ; pendant un tour long, un rappel revient toutes les 20 minutes tant qu'un résultat attend.
+- Un sous-agent a sa fiche : sa mission mot pour mot (copiée par le hook quand elle est lisible, sinon recopiée par lui), puis ses notes d'avancement (`note --fiche <ID> "..."`). Après un compactage de SON contexte, sa fiche lui est rendue : c'est elle qui fait foi, pas le résumé. Avec Codex, où la mission est chiffrée pour les hooks, l'agent principal l'écrit aussi dans un fichier du dossier de travail avant de lancer le sous-agent, et lui en donne le chemin.
+- Un sous-agent lit la liste de l'agent principal (fichier, ou commande `chercher`) et ne la modifie jamais. Sa mission est celle de son lancement : ce qu'il lit dans la liste, ou ce dont il a hérité, ne lui donne aucun travail.
+- Dans la liste, « ouvert » veut dire « pas encore prouvé fait », pas « pas fait ». Un sous-agent qui constate qu'une ligne est déjà faite le signale (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`) ; l'agent principal vérifie et ferme la ligne par sa propre preuve. `--genre bloque` et `--genre question` passent par le même chemin : dits à l'agent principal à son prochain événement.
 
 ## 4. Quand un travail est fait
 
@@ -58,6 +62,7 @@ Format, identique pour tous :
 4. Pas de doublon : ne pas réinsérer une ligne identique (les hooks dédoublonnent par SHA de commit).
 5. Les hooks ne prouvent pas qu'un travail est branché, testé ou déployé : ils journalisent. La preuve reste à écrire.
 6. La liste de travail ne se modifie jamais à la main : une garde refuse, et toute ligne effacée est restaurée.
+7. Seul l'agent principal écrit dans la liste. Un sous-agent la lit, écrit dans sa fiche, et signale ce qu'il constate.
 
 ## 6. Ce que font les hooks
 
@@ -66,13 +71,15 @@ Format, identique pour tous :
 | Début de session | `claude/context-ledger.js` ou `codex/context-ledger.js` | réinjecte la liste de travail |
 | Début de session | `memoire/demarrage.js` | réinjecte la mémoire du projet |
 | Message de l'utilisateur | `context-ledger.js` | enregistre le message mot pour mot |
-| Avant un outil | `context-ledger.js` | refuse toute écriture à la main dans la liste de travail |
-| Après un outil | `context-ledger.js` | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir et rappelle les résultats qui attendent |
+| Avant un outil | `context-ledger.js` | refuse toute écriture à la main dans la liste de travail ; pour un sous-agent : lecture permise, écriture refusée |
+| Après un outil | `context-ledger.js` | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et rappelle les résultats qui attendent ; rend sa fiche à un sous-agent dont le contexte vient d'être compacté |
 | Après un commit | `memoire/commit.js` | entrée signée dans le journal et le résumé |
 | Après une écriture de fichier | `memoire/marqueur.js` | compte le travail non documenté |
 | Fin de tour | `context-ledger.js` | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités |
 | Fin de tour | `memoire/checkpoint.js` | point de contrôle toutes les deux heures |
+| Démarrage d'un sous-agent | `context-ledger.js` | crée sa fiche et lui donne sa consigne (redonnée à son premier outil si cet événement a manqué, ou si sa conversation ne la contient pas) |
 | Fin d'un sous-agent | `context-ledger.js` | marque son résultat « à traiter » |
 | Avant compactage | `memoire/avant-compactage.js` | sauve l'état des dépôts |
+| Après compactage | `context-ledger.js` | note le compactage d'un sous-agent ; Codex : programme la réinjection de la liste |
 | Après compactage | `memoire/rappel.js` | réinjecte les 12 dernières heures |
 | Fin de session | `memoire/fin-session.js` | entrée « wip » si du travail n'est pas commité |
