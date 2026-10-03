@@ -96,6 +96,12 @@
  *   texteSuiviEnCours({agent, sessionId}) -> en cours de tour : signalements des sous-agents, fins pas encore
  *        annoncées à l'orchestrateur, rappel des résultats qui attendent (au plus une fois par délai) ; '' sinon
  *
+ * Signalements entre agents principaux (boîte par agent : <racine>\.signalements\<agent>.jsonl, jamais réécrite)
+ *   signalerAgent({de, vers, projet, ligne, genre, texte}) -> signalement   sur une ligne encore ouverte de `vers`
+ *   texteSignalementsAgents({agent, sessionId, session}) -> nouveaux signalements du projet de la session, dits
+ *        une fois (appelé par texteSuiviEnCours) ; texteSignalementsEnAttente({agent, projet}) -> ceux dont la
+ *        ligne est encore ouverte (repris par contexteSession) ; lireBoite(agent, depuis) -> {fin, signalements}
+ *
  * Fiches des sous-agents (un fichier par sous-agent : identité, mission mot pour mot, notes qu'il ajoute)
  *   <racine>\<projet>.<agent>\fiches\<genre>-<12 derniers caractères de l'ID>.md ; index : <racine>\.fiches\<agent>-<ID>.json
  *   creerFiche({agent, sessionId, id, projet, ligne, titre, titreRepli, genre, mission, cwd}) -> chemin
@@ -158,6 +164,7 @@
  *     etat --projet P C-NNNN ouvert|en-cours|bloque-utilisateur ["note"] | abandon --projet P C-NNNN "citation"
  *     lister [--projet P]        (--fichier <chemin> remplace le texte libre, lu en UTF-8)
  *     chercher [--projet P] [--agent A] "mot"... | fiche <ID> | note --fiche <ID> [--genre g] "texte" | help
+ *     signaler --agent A --projet P C-NNNN [--genre g] "texte"   (agent principal : prévient l'agent A)
  */
 
 const fs = require('fs');
@@ -1457,11 +1464,14 @@ function texteSignalements(agent, sessionId, taches) {
 function texteSuiviEnCours({ agent, sessionId }) {
   validerAgent(agent);
   const s = lireSession(agent, sessionId);
+  // Signalements d'un autre agent principal sur une ligne de cette liste (boîte de l'agent).
+  let agents = '';
+  try { agents = texteSignalementsAgents({ agent, sessionId, session: s }); } catch (_) { agents = ''; } // ancre-mutation:signalements-agents
   const taches = s && estObjet(s.taches) ? s.taches : {};
-  if (!Object.values(taches).some(t => estObjet(t) && !t.clos)) return '';
+  if (!Object.values(taches).some(t => estObjet(t) && !t.clos)) return agents;
   const signalements = texteSignalements(agent, sessionId, taches);
   const fins = texteFinsEtRappel(agent, sessionId, s, taches);
-  return [signalements, fins].filter(Boolean).join('\n');
+  return [agents, signalements, fins].filter(Boolean).join('\n');
 }
 
 // Trouvé dans une session réelle : l'événement de fin du sous-agent marque la fin sans rien dire à
@@ -1487,6 +1497,110 @@ function texteFinsEtRappel(agent, sessionId, s, taches) {
   const liste = etat.attente.slice(0, MAX_LIVRAISONS).map(t => `${t.ligne} « ${t.titre} »`).join(' ; ');
   const plus = etat.attente.length > MAX_LIVRAISONS ? ` ; et ${etat.attente.length - MAX_LIVRAISONS} autre(s)` : '';
   return `Rappel : ${etat.attente.length} sous-agent(s) TERMINÉ(S) dont le résultat n'est toujours pas traité : ${liste}${plus}. N'attends pas la fin du tour : dès que l'étape en cours est finie, lis chaque résultat (son chemin est dans la note de sa ligne), vérifie-le, intègre-le, puis cite [ctx C-NNNN] dans l'historique.${texteEnCours(etat)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Signalements entre agents principaux (cas à couvrir : un agent voit dans la liste d'un autre une tâche
+// encore ouverte alors qu'elle est faite). Un agent principal ne modifie jamais la liste d'un autre : il dépose un signalement dans la boîte
+// de l'agent qui la tient (commande signaler). Celui-ci le reçoit à son prochain événement dans le projet de
+// la ligne (texteSuiviEnCours), vérifie, et ferme la ligne par SA preuve. Tant que la ligne reste ouverte, le
+// signalement reste dans la liste réinjectée au démarrage et après un compactage (contexteSession).
+//   <racine>\.signalements\<destinataire>.jsonl     un signalement par ligne, jamais réécrit
+//   <racine>\.signalements\<destinataire>.vus.json  octet de la boîte déjà annoncé, par projet
+const MAX_SIGNALEMENTS_LISTE = 10;
+const CONSIGNES_SIGNALEMENT_AGENT = {
+  'deja-fait': ligne => `Vérifie dans le code ou l'historique : si c'est exact, ferme la ligne par une preuve [ctx ${ligne}] ; sinon laisse-la ouverte et dis à l'utilisateur pourquoi.`,
+  bloque: () => 'Il attend cette ligne : traite-la, ou dis à l\'utilisateur ce qui manque.',
+  question: () => 'Réponds dans ta prochaine réponse à l\'utilisateur.',
+};
+
+function cheminBoite(agent) { return path.join(racine(), '.signalements', `${agent}.jsonl`); }
+function cheminVusBoite(agent) { return path.join(racine(), '.signalements', `${agent}.vus.json`); }
+// « Déjà fait », « deja fait », « deja-fait » : le même genre.
+function normaliserGenre(genre) {
+  return chaine(genre).trim().toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 30);
+}
+
+// Dépose un signalement dans la boîte de l'agent `vers`, sur une ligne encore ouverte de SA liste.
+function signalerAgent({ de, vers, projet, ligne, genre, texte }) {
+  validerAgent(de);
+  validerAgent(vers);
+  if (de === vers) throw new Error('signaler prévient un AUTRE agent : ta propre liste se met à jour avec etat, et une ligne se ferme par une preuve [ctx]');
+  validerProjet(projet);
+  const id = normaliserId(ligne, 'C');
+  const g = normaliserGenre(genre || 'deja-fait');
+  if (!GENRES_SIGNALEMENT.has(g)) throw new Error(`genre inconnu : ${chaine(genre)} (deja-fait, bloque ou question)`);
+  const t = chaine(texte).trim();
+  if (!t) throw new Error('signaler : donne la preuve, le blocage ou la question');
+  const l = lireLedger(projet, vers).lignes[id];
+  if (!l) throw new Error(`${id} absente de la liste de ${vers} (projet ${projet})`);
+  if (TERMINAUX.includes(l.statut)) throw new Error(`${id} est déjà « ${l.statut} » dans la liste de ${vers} : rien à signaler`);
+  const sig = {
+    id: `S-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`, le: maintenantIso(), de, projet,
+    ligne: id, genre: g, texte: t.replace(/\s+/g, ' ').slice(0, 1000),
+  };
+  const f = cheminBoite(vers);
+  reessayer(() => avecVerrou(f, () => ajouterAuFichier(f, JSON.stringify(sig) + '\n'))); // ancre-mutation:signaler-boite
+  return sig;
+}
+
+function lireBoite(agent, depuis) {
+  const f = cheminBoite(agent);
+  let taille;
+  try { taille = fs.statSync(lp(f)).size; } catch (_) { return { fin: 0, signalements: [] }; }
+  const out = [];
+  const fin = lireLignesDepuis(f, Math.min(depuis || 0, taille), taille, l => {
+    try { const o = JSON.parse(l.toString('utf8')); if (estObjet(o) && o.ligne && o.projet) out.push(o); } catch (_) { /* ligne illisible : ignorée */ }
+  });
+  return { fin, signalements: out };
+}
+
+function decrireSignalement(s) {
+  const le = Date.parse(s.le || '');
+  return `${s.ligne} (de ${s.de}, ${s.genre}${Number.isFinite(le) ? `, ${dateLocale(new Date(le))}` : ''}) : « ${chaine(s.texte).slice(0, 300)} »`;
+}
+
+// Signalements arrivés depuis la dernière annonce, pour le projet de la session : dits une fois.
+function texteSignalementsAgents({ agent, sessionId, session }) {
+  const s = session || lireSession(agent, sessionId);
+  const projet = s && s.projet;
+  if (!projet) return '';
+  let taille;
+  try { taille = fs.statSync(lp(cheminBoite(agent))).size; } catch (_) { return ''; }
+  const lireVus = () => { try { const o = JSON.parse(sansBom(lireTexte(cheminVusBoite(agent)) || '{}')); return estObjet(o) ? o : {}; } catch (_) { return {}; } };
+  const vus = lireVus();
+  const depuis = Number.isFinite(vus[projet]) && vus[projet] <= taille ? vus[projet] : 0;
+  if (depuis >= taille) return '';
+  const { fin, signalements } = lireBoite(agent, depuis);
+  const nouveaux = signalements.filter(x => x.projet === projet);
+  try {
+    reessayer(() => avecVerrou(cheminVusBoite(agent), () => {
+      const cour = lireVus();
+      if (Number.isFinite(cour[projet]) && cour[projet] >= fin) return;
+      cour[projet] = fin;
+      ecrireAtomique(cheminVusBoite(agent), JSON.stringify(cour) + '\n');
+    }));
+  } catch (_) { /* redit au prochain événement : mieux qu'un signalement jamais dit */ }
+  if (!nouveaux.length) return '';
+  const etat = lireLedger(projet, agent);
+  const textes = nouveaux.map(x => {
+    const l = etat.lignes[x.ligne];
+    const consigne = CONSIGNES_SIGNALEMENT_AGENT[x.genre] ? CONSIGNES_SIGNALEMENT_AGENT[x.genre](x.ligne) : '';
+    const le = Date.parse(x.le || '');
+    return `Signalement de ${x.de} sur ta ligne ${x.ligne} (${x.genre}${Number.isFinite(le) ? `, ${dateLocale(new Date(le))}` : ''} ; état de la ligne : ${l ? l.statut : 'absente de ta liste'}) : « ${chaine(x.texte).slice(0, 300)} ». ${consigne}`;
+  });
+  return textes.slice(0, MAX_LIVRAISONS).join('\n') + (textes.length > MAX_LIVRAISONS ? `\n(${textes.length - MAX_LIVRAISONS} signalement(s) de plus : ${cheminBoite(agent)})` : '');
+}
+
+// Signalements dont la ligne est encore ouverte : rappelés avec la liste (démarrage, reprise, compactage).
+function texteSignalementsEnAttente({ agent, projet }) {
+  const { signalements } = lireBoite(agent, 0);
+  if (!signalements.length) return '';
+  const etat = lireLedger(projet, agent);
+  const ouverts = signalements.filter(x => x.projet === projet && etat.lignes[x.ligne] && !TERMINAUX.includes(etat.lignes[x.ligne].statut));
+  if (!ouverts.length) return '';
+  const plus = ouverts.length > MAX_SIGNALEMENTS_LISTE ? ` ; et ${ouverts.length - MAX_SIGNALEMENTS_LISTE} plus ancien(s) dans ${cheminBoite(agent)}` : '';
+  return `Signalements d'autres agents sur des lignes encore ouvertes (${ouverts.length}) : ${ouverts.slice(-MAX_SIGNALEMENTS_LISTE).map(decrireSignalement).join(' ; ')}${plus}. Vérifie chacun : si c'est exact, ferme la ligne par une preuve [ctx C-NNNN].`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2346,7 +2460,9 @@ function contexteSession({ agent, projet, script }) {
   const cmd = commandes(script, projet);
   const etat = lireLedger(projet, agent);
   const alerte = avertissementSecours();
-  const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\nCe fichier fait foi pour ce qui reste, pas le résumé de compactage.\n${POUR_ORCHESTRATEUR}${alerte ? '\n' + alerte : ''}`;
+  let attente = '';
+  try { attente = texteSignalementsEnAttente({ agent, projet }); } catch (_) { attente = ''; } // ancre-mutation:signalements-attente
+  const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\nCe fichier fait foi pour ce qui reste, pas le résumé de compactage.\n${POUR_ORCHESTRATEUR}${alerte ? '\n' + alerte : ''}${attente ? '\n' + attente : ''}`;
   const pied = `Commandes : \`${cmd.ajouter()}\` ; \`${cmd.etat}\` ; \`${cmd.lister}\`. Une ligne ne disparaît que sur preuve [ctx C-NNNN] (historique, mémoire ou commit).`;
   return composerContexte(entete, lignesCompactes(etat), pied, cmd.lister);
 }
@@ -2376,6 +2492,9 @@ const USAGE = [
   '  note --fiche <ID du sous-agent> [--genre mission|fait|reste|a-inscrire] "texte"   (ajoute une note à la fiche)',
   '       --genre deja-fait|bloque|question : la note est aussi signalée à l\'orchestrateur, à son prochain événement',
   '  help                                                           (cette aide)',
+  '  signaler --agent A --projet P C-NNNN [--genre deja-fait|bloque|question] "texte"   (agent principal seulement)',
+  '       prévient l\'agent A qu\'une ligne de SA liste est déjà faite, le bloque ou pose question ; A la vérifie',
+  '       et ne la ferme que sur sa propre preuve',
   '  (--fichier <chemin> : lit le texte libre dans un fichier UTF-8)',
   'Aucune commande ne marque « fait » : seule une preuve [ctx C-NNNN] le fait.',
   'Sous-agents : lister, chercher, fiche et help en lecture ; note sur leur propre fiche ; rien d\'autre.',
@@ -2432,7 +2551,7 @@ function chercher({ projet, agent, motifs }) {
     for (const t of touches.slice(0, MAX_RESULTATS_RECHERCHE)) out.push('  ' + t);
     if (touches.length > MAX_RESULTATS_RECHERCHE) out.push(`  (${touches.length - MAX_RESULTATS_RECHERCHE} de plus : précise le mot)`);
   }
-  out.push(`Rappel : ${OUVERT_NEST_PAS_PAS_FAIT} Une ligne que tu constates déjà faite se signale à celui qui tient la liste (sous-agent : note --genre deja-fait dans ta fiche), elle ne se ferme que sur sa preuve.`); // ancre-mutation:chercher-rappel
+  out.push(`Rappel : ${OUVERT_NEST_PAS_PAS_FAIT} Une ligne que tu constates déjà faite se signale à celui qui tient la liste (sous-agent : note --genre deja-fait dans ta fiche ; agent principal : signaler --agent <celui qui tient la liste> --projet <P> C-NNNN "la preuve"), elle ne se ferme que sur sa preuve.`); // ancre-mutation:chercher-rappel
   return out.join('\n');
 }
 
@@ -2455,8 +2574,8 @@ function executerCli(argv, { agent, script }) {
     const [commande, ...reste] = argv;
     // Aide (appelée aussi par les sous-agents) : rien à lire ni à écrire.
     if (['help', '--help', '-h', 'aide'].includes(commande)) return ok(USAGE); // ancre-mutation:cli-help
-    // Lecture et fiches (appelées aussi par les sous-agents) : rien à vérifier ni à écrire dans la liste.
-    if (!['chercher', 'fiche', 'note'].includes(commande)) {
+    // Lecture, fiches et signalements : rien à vérifier ni à écrire dans la liste de l'appelant.
+    if (!['chercher', 'fiche', 'note', 'signaler'].includes(commande)) {
       try { assurerIntegrite(agent); } catch (_) { /* chaque écriture revérifie sous verrou */ }
     }
     const { opts, pos } = analyserArgs(reste);
@@ -2503,6 +2622,13 @@ function executerCli(argv, { agent, script }) {
         if (!opts.fiche) throw new Error('note : --fiche <ID de travail du sous-agent> requis');
         const r = noterFiche({ agent, id: opts.fiche, genre: opts.genre, texte: texteLibre(0) });
         return ok(`Noté dans ${r.fiche} (${r.notes} note(s)${r.mission ? '' : ' ; mission encore absente : recopie-la avec --genre mission'}).`);
+      }
+      case 'signaler': {
+        // Agent principal seulement (la garde le refuse aux sous-agents, qui signalent dans leur fiche).
+        if (!opts.agent) throw new Error('signaler : --agent <agent qui tient la liste> requis');
+        if (!opts.projet) throw new Error('--projet requis');
+        const sig = signalerAgent({ de: agent, vers: validerAgent(opts.agent), projet: opts.projet, ligne: pos[0], genre: opts.genre, texte: texteLibre(1) });
+        return ok(`Signalement ${sig.id} déposé pour ${opts.agent} sur ${sig.ligne} (projet ${opts.projet}, ${sig.genre}) : il le recevra à son prochain événement dans ce projet, et ne fermera la ligne que sur sa propre preuve.`);
       }
       case 'fiche': {
         const id = pos[0] || opts.fiche;
@@ -2582,6 +2708,7 @@ module.exports = {
   lireSession, modifierSession, lierSession, projetDeSession, enregistrerMessage, rappelStop,
   secours, contexteEchecMessage, lireLignesDepuis, suiteTranscript,
   suivreTache, finirTache, livraisons, tacheParAlias, texteLivraisons, texteFins, texteSuiviEnCours,
+  signalerAgent, texteSignalementsAgents, texteSignalementsEnAttente, lireBoite,
   creerFiche, lireFiche, lireIndexFiche, noterFiche, chercher, MISSION_ABSENTE,
   texteConsigneSousAgent, consigneADonner, consigneDansTranscript, texteRepriseSousAgent, texteLectureSeule, compactageDuSousAgent, noterCompactage,
   transcriptDUnSousAgent, idDepuisTranscript,

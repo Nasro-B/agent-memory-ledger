@@ -44,6 +44,11 @@ Un hook te le dit : « Fichier contexte : tu es un sous-agent », avec le chemin
 - La liste de l'agent principal se lit (le fichier, `chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes entières), elle ne se modifie pas. Une lecture par commande simple, sans boucle ni script.
 - Tu constates qu'une ligne de la liste est déjà faite : tu ne la fermes pas, tu le signales avec sa preuve (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`). Bloqué, ou une question pour l'agent principal : `--genre bloque`, `--genre question`.
 
+## Entre agents principaux
+
+- Une ligne de la liste d'un AUTRE agent que tu vois déjà faite, qui te bloque ou qui pose question : ne la modifie pas, signale-la (`signaler --agent <celui qui tient la liste> --projet P C-NNNN [--genre deja-fait|bloque|question] "la preuve"`).
+- Un signalement reçu t'est dit à ton prochain événement, puis rappelé avec ta liste tant que la ligne est ouverte : vérifie, ferme-la par ta preuve, ou dis à l'utilisateur pourquoi elle reste ouverte.
+
 ## Messages reçus pendant que tu travailles
 
 Ils sont enregistrés au prochain événement, et annoncés : « reçu(s) pendant ce tour ». Trie-les comme les autres. Les réponses de l'utilisateur à un questionnaire sont enregistrées de la même façon : ce sont ses décisions. Si un message est signalé « NON enregistré », inscris-le toi-même mot pour mot avec `ajouter`.

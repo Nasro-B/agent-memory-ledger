@@ -870,6 +870,23 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     assert.match(ctx(await outil(e2, sb)), /note --fiche th-12 /);
   });
 
+  // Un autre agent principal (ici Claude) qui voit une ligne de la liste de Codex déjà faite la signale dans la
+  // boîte de Codex ; Codex le lit à son prochain outil, une fois.
+  test('signalement entre agents : Claude signale une ligne de Codex, dit au prochain outil de Codex, une seule fois', async () => {
+    const d = dossier('signalement-agents');
+    const parent = rolloutParent(d);
+    await tourTrie(d, parent, 't1', 'travaille sur le lot B');
+    await attendreBase(d);
+    const id = avecRacine(d, () => core.ajouterLigne({ projet: PROJET, agent: 'codex', texte: 'Relire le lot B', de: null }));
+    avecRacine(d, () => core.signalerAgent({ de: 'claude', vers: 'codex', projet: PROJET, ligne: id, genre: 'deja-fait', texte: 'lot B relu et intégré (historique du 2026-10-03)' }));
+    const outil = () => hook(d, payload('PostToolUse', { transcript_path: parent }));
+    const c = ctx(await outil());
+    assert.ok(c.startsWith(`Signalement de claude sur ta ligne ${id} (deja-fait, `), c.slice(0, 200));
+    assert.match(c, new RegExp(`« lot B relu et intégré \\(historique du 2026-10-03\\) »\\. Vérifie dans le code ou l'historique : si c'est exact, ferme la ligne par une preuve \\[ctx ${id}\\]`));
+    assert.equal((await outil()).out, '', 'dit une seule fois');
+    assert.equal(etat(d).lignes[id].statut, 'ouvert', 'le signalement ne ferme rien');
+  });
+
   // Trou trouvé dans une session réelle de Claude Code (un tour de plus de 4 heures, 7 résultats sans
   // rappel) : le noyau est commun, le même suivi en cours de tour est branché ici.
   test('sous-agents : tour long sans fin de tour -> fin annoncée une fois au prochain outil, puis rappel passé le délai, jusqu\'à la preuve', async () => {
@@ -1073,6 +1090,8 @@ const MUTATIONS = [
   { nom: 'reprise-sous-agent', motif: '^sous-agents : fiche', transformer: s => s.replace(/if \(compacte\) \{ contexte\([^\n]*\/\/ ancre-mutation:reprise-sous-agent/, '// mutation') },
   { nom: 'consigne-filet', motif: '^sous-agents : consigne', transformer: s => s.replace(/if \(!index\.reprises && !index\.consigneVerifieeLe[^\n]*\/\/ ancre-mutation:consigne-filet/, '// mutation') },
   // Sans le transcript, la consigne marquée mais perdue n'est plus redonnée.
+  // Suivi en cours débranché : le signalement d'un autre agent n'arrive plus à Codex.
+  { nom: 'signalements-agents', motif: '^signalement entre agents', transformer: s => s.replace(/try \{ return core\.texteSuiviEnCours\([^\n]*\/\/ ancre-mutation:suivi-en-cours/, "return ''; // mutation") },
   { nom: 'consigne-transcript', motif: '^sous-agents : consigne marquée', transformer: s => s.replace(/fichier: input\.transcript_path, formes: \['"role":"developer"'\] \}\)\) contexte\(evenement/, "formes: ['\"role\":\"developer\"'] })) contexte(evenement") },
   { nom: 'stop-budget', motif: '^Stop Codex : budget', transformer: s => s.replace(/const sIlResteDuTemps = [^\n]*\/\/ ancre-mutation:stop-budget/, 'const sIlResteDuTemps = fn => { try { fn(); } catch (_) { /* mutation */ } };') },
   { nom: 'reconciliateur', motif: 'preuve par contenu|réconciliateur|CRLF', transformer: s => s.replace(/const r = core\.reconcilier\(\{ agent: AGENT, base: basePreuves\(\) \}\);/, 'const r = { faits: [], partiels: [], ignores: [], projets: [] };') },

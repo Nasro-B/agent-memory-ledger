@@ -1991,6 +1991,45 @@ test('signalement d\'un sous-agent (déjà fait, bloqué, question) : dit à l\'
   assert.equal(indexFiche(dir, ID).signalements.length, 3);
 });
 
+// Un agent principal qui voit dans la liste d'un AUTRE agent une ligne déjà faite ne la modifie pas ;
+// il la signale dans la boîte de cet agent, qui vérifie et ferme par sa preuve.
+test('signalement entre agents principaux : déposé par signaler, dit une fois à l\'agent qui tient la liste, rappelé tant que la ligne reste ouverte', () => {
+  const dir = dossier('signalement-agents');
+  preparerLigne(dir);
+  // Codex signale une ligne de la liste de Claude (ce que fait sa commande signaler, avec de = codex).
+  avecRacine(dir, () => core.signalerAgent({ de: 'codex', vers: 'claude', projet: PROJET, ligne: 'C-0001', genre: 'Déjà fait', texte: 'corrigé par le commit abc1234 (Bouton.tsx:42)' }));
+  const outil = () => hook(dir, { hook_event_name: 'PostToolUse', session_id: 'sess-1', prompt_id: 'p-1', cwd: CWD_PROJET, tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} });
+  const a = contexte(outil());
+  assert.match(a, /^Signalement de codex sur ta ligne C-0001 \(deja-fait, \d{4}-\d\d-\d\d \d\d:\d\d ; état de la ligne : ouvert\) : « corrigé par le commit abc1234 \(Bouton\.tsx:42\) »\. Vérifie dans le code ou l'historique : si c'est exact, ferme la ligne par une preuve \[ctx C-0001\]/);
+  assert.equal(outil().out, '', 'dit une seule fois');
+  assert.equal(etat(dir).lignes['C-0001'].statut, 'ouvert', 'le signalement ne ferme rien');
+  // Tant que la ligne est ouverte, il revient avec la liste (démarrage, reprise, compactage).
+  const reprise = () => contexte(hook(dir, { hook_event_name: 'SessionStart', session_id: 'sess-1', cwd: CWD_PROJET, source: 'resume' }));
+  assert.match(reprise(), /\nSignalements d'autres agents sur des lignes encore ouvertes \(1\) : C-0001 \(de codex, deja-fait, .+\) : « corrigé par le commit abc1234/);
+  // Claude vérifie et ferme la ligne par sa preuve : le signalement ne revient plus.
+  postWrite(dir, histoire(dir), '- bouton de paiement : corrigé par abc1234, vérifié [ctx C-0001]\n');
+  assert.equal(etat(dir).lignes['C-0001'].statut, 'fait');
+  assert.ok(!/Signalements d'autres agents/.test(reprise()));
+  // Dans l'autre sens, par la CLI : Claude signale une question sur une ligne de la liste de Codex.
+  const idCodex = avecRacine(dir, () => core.ajouterLigne({ projet: PROJET, agent: 'codex', texte: 'Ligne tenue par Codex', de: null }));
+  const r = cli(dir, ['signaler', '--agent', 'codex', '--projet', PROJET, idCodex, '--genre', 'question', 'Quelle branche pour ce correctif ?']);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, new RegExp(`^Signalement S-[a-z0-9]+-[0-9a-f]{6} déposé pour codex sur ${idCodex} \\(projet ${PROJET}, question\\)`));
+  const boite = avecRacine(dir, () => core.lireBoite('codex', 0)).signalements;
+  assert.deepEqual(boite.map(s => [s.de, s.ligne, s.genre, s.texte]), [['claude', idCodex, 'question', 'Quelle branche pour ce correctif ?']]);
+  assert.deepEqual(Object.keys(etat(dir, PROJET, 'codex').lignes), [idCodex], 'la liste de Codex n\'est pas modifiée');
+  // Refus : sa propre liste, une ligne absente ou close, sans destinataire, texte vide.
+  for (const args of [
+    ['--agent', 'claude', '--projet', PROJET, 'C-0001', 'x'],
+    ['--agent', 'codex', '--projet', PROJET, 'C-9999', 'x'],
+    ['--projet', PROJET, idCodex, 'x'],
+    ['--agent', 'codex', '--projet', PROJET, idCodex],
+  ]) assert.equal(cli(dir, ['signaler', ...args]).code, 1, `devait refuser : ${args.join(' ')}`);
+  // Un sous-agent ne signale pas à un autre agent : il signale dans sa fiche, à son orchestrateur.
+  const S = 'node "C:/outils/agent-memory-ledger/scripts/claude/context-ledger.js"';
+  assert.ok(core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'Bash', tool_input: { command: `${S} signaler --agent codex --projet x C-0001 "y"` }, cwd: CWD_PROJET } }));
+});
+
 test('transcript d\'un sous-agent : jamais lu avec l\'octet déjà vu de l\'orchestrateur (Claude : dossier subagents ; Codex : autre fil)', () => {
   const dir = dossier('transcript-sous-agent');
   const S = '01a0f9c2-ee5a-78c2-8f76-422e0199aea6';
@@ -2106,7 +2145,7 @@ test('budget de temps : l\'attente d\'un verrou s\'arrête à l\'échéance du h
 });
 
 test('mutation : fiches de sous-agents, lecture de la liste, signalements, budget de temps -> banc rouge', { skip: EN_MUTATION }, () => {
-  const motif = '^(fiche de sous-agent|compactage d.un sous-agent|signalement d.un sous-agent|transcript d.un sous-agent|chercher|budget de temps|garde : sous-agent|message humain|capture de diagnostic)';
+  const motif = '^(fiche de sous-agent|compactage d.un sous-agent|signalement d.un sous-agent|signalement entre agents|transcript d.un sous-agent|chercher|budget de temps|garde : sous-agent|message humain|capture de diagnostic)';
   const temoin = relancer(copie('temoin-fiches'), motif);
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
   const NOYAU = 'lib/context-ledger-core.js';
@@ -2148,6 +2187,10 @@ test('mutation : fiches de sous-agents, lecture de la liste, signalements, budge
     ['sous-expression-appel', '    // MUTATION : & (x) accepté', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
     ['variable-pipeline', '    // MUTATION : variable acceptée après un |', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
     ['masque-utf16', '  const masque = [...c]; // MUTATION : masque par points de code, segments décalés', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    // Boîte de signalements entre agents principaux.
+    ['signaler-boite', '  // MUTATION : boîte jamais écrite', /not ok \d+ - signalement entre agents/, NOYAU, '^signalement entre agents'],
+    ['signalements-agents', '  // MUTATION : signalements d\'autres agents jamais dits', /not ok \d+ - signalement entre agents/, NOYAU, '^signalement entre agents'],
+    ['signalements-attente', '  // MUTATION : signalements en attente absents de la liste réinjectée', /not ok \d+ - signalement entre agents/, NOYAU, '^signalement entre agents'],
   ];
   for (const [ancre, remplacement, rouge, fichier, seul] of mutations) {
     const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), seul);

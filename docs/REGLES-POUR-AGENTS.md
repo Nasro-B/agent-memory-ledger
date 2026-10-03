@@ -41,6 +41,11 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   par un hook) : après un compactage, c'est elle qui fait foi. Dans la liste, « ouvert » veut dire « pas
   encore prouvé fait » : si tu constates qu'une ligne est déjà faite, tu ne la fermes pas, tu le signales
   (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`).
+- Agent principal : une ligne de la liste d'un AUTRE agent que tu vois déjà faite, bloquante ou à éclaircir ne
+  se modifie jamais. Signale-la : `node "<SCRIPT>" signaler --agent <celui qui tient la liste> --projet P C-NNNN
+  [--genre deja-fait|bloque|question] "la preuve"`. Un signalement reçu t'est dit à ton prochain événement dans
+  ce projet, puis rappelé avec ta liste tant que la ligne est ouverte : vérifie, ferme-la par ta preuve, ou dis à
+  l'utilisateur pourquoi elle reste ouverte.
 - Après un compactage, à une reprise, et avant toute réponse « il ne reste que » : c'est cette liste qui fait
   foi, pas le résumé de la conversation (`lister --projet P`).
 

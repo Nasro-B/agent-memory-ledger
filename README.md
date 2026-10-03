@@ -105,6 +105,17 @@ Un sous-agent ne tient pas la liste. Il a sa propre fiche, et il lit la liste sa
 - **Il ne dévie pas.** Sa consigne le dit : sa mission est celle de son lancement ; les messages de l'utilisateur et les lignes ouvertes qu'il lit, ou dont il a hérité, s'adressent à l'agent principal et ne lui donnent aucun travail. La liste injectée à l'agent principal porte la mention « Pour l'orchestrateur seulement », parce qu'un sous-agent peut la voir sans en être le destinataire : avec Codex, il démarre avec une copie de la conversation de l'agent principal.
 - **« Ouvert » ne veut pas dire « pas fait »**, mais « pas encore prouvé fait ». Un sous-agent qui constate qu'une ligne est déjà faite ne la ferme pas, il le signale : `note --fiche <ID> --genre deja-fait "C-0107 : la preuve"`. L'agent principal lit le signalement à son prochain événement, vérifie, et ferme la ligne par sa propre preuve. Deux autres signalements passent par le même chemin : `--genre bloque` et `--genre question`.
 
+## Entre agents principaux
+
+Chaque agent principal tient sa propre liste. Quand l'un voit dans la liste d'un autre une ligne déjà faite, qui le bloque ou qui pose question, il ne la modifie pas : il la signale.
+
+```
+node "<script>" signaler --agent claude --projet P C-0107 "corrigé par le commit abc1234"
+node "<script>" signaler --agent codex --projet P C-0042 --genre question "quelle branche pour ce correctif ?"
+```
+
+Le signalement va dans la boîte de l'agent qui tient la liste (`contexte/.signalements/<agent>.jsonl`). Celui-ci le reçoit à son prochain événement dans ce projet, une seule fois ; tant que la ligne reste ouverte, le signalement revient avec sa liste au démarrage et après un compactage. Il vérifie, puis ferme la ligne par sa propre preuve, ou dit à l'utilisateur pourquoi elle reste ouverte. Un sous-agent ne signale pas à un autre agent : il le fait dans sa fiche, et son agent principal relaie s'il le faut.
+
 ## Où sont les données
 
 Dans `~/.agent-memory-ledger`, jamais dans vos dépôts. Pour un autre emplacement : la variable `AGENT_MEMORY_LEDGER_HOME`.
@@ -128,10 +139,10 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 
 | Événement | Liste de travail | Mémoire |
 | --- | --- | --- |
-| Début de session | réinjecte ce qui reste | règles du projet, résumé, journaux récents, alerte de travail non documenté |
+| Début de session | réinjecte ce qui reste, avec les signalements d'un autre agent sur des lignes encore ouvertes | règles du projet, résumé, journaux récents, alerte de travail non documenté |
 | Message de l'utilisateur | enregistre mot pour mot | |
 | Avant un outil | refuse l'écriture à la main dans la liste ; pour un sous-agent : lecture permise, écriture refusée | |
-| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et rappelle les résultats qui attendent, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) ; pour un sous-agent : lui rend sa fiche après un compactage de son contexte, ou lui donne sa consigne si son démarrage a manqué | journalise les commits, compte les fichiers modifiés |
+| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et ceux d'un autre agent principal, rappelle les résultats qui attendent, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) ; pour un sous-agent : lui rend sa fiche après un compactage de son contexte, ou lui donne sa consigne si son démarrage a manqué | journalise les commits, compte les fichiers modifiés |
 | Fin de tour | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités | point de contrôle toutes les deux heures |
 | Démarrage d'un sous-agent | crée sa fiche et lui donne sa consigne | |
 | Fin d'un sous-agent | marque son résultat « à traiter » | |
@@ -160,16 +171,16 @@ Pour connaître la forme et la durée réelles des événements que vos agents e
 
 Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 
-**Par bancs de tests** (sans modèle, payloads simulés) : 160 tests, tous verts.
+**Par bancs de tests** (sans modèle, payloads simulés) : 163 tests, tous verts.
 
 | Banc | Tests | Couvre |
 | --- | --- | --- |
-| `tests/context-ledger-claude.test.js` | 83 | noyau et adaptateur Claude Code |
-| `tests/context-ledger-codex.test.js` | 57 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
+| `tests/context-ledger-claude.test.js` | 84 | noyau et adaptateur Claude Code |
+| `tests/context-ledger-codex.test.js` | 59 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
 | `tests/memoire.test.js` | 14 | hooks de mémoire, détection de projet, installateur Codex |
 | `tests/verifier-public.test.js` | 6 | contrôle avant publication |
 
-Soixante-seize mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien.
+Quatre-vingts mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien.
 
 **En conditions réelles** :
 
@@ -182,7 +193,7 @@ Soixante-seize mutations y sont jouées : on casse volontairement une protection
 
 **Observé, et défavorable** : pendant cette nuit, aucun des 22 sous-agents Codex n'a écrit dans sa fiche, ni note ni mission, même après l'avoir reçue. Ils n'avaient pas eu la consigne de démarrage ; et Codex chiffre la mission partout (entrée des hooks, conversation du parent, conversation du sous-agent), le hook ne peut donc pas la copier à leur place. Avec Codex, la fiche rendue après un compactage ne portait ni mission ni notes : elle a servi à ne pas injecter la liste du parent et à redire au sous-agent de s'en tenir à sa mission. Avec Claude Code, la mission est copiée par le hook, sans dépendre du sous-agent. Lecture de la liste par ces sous-agents après le correctif : 235 lectures passées, 23 refusées (boucles et affectations PowerShell que la garde ne sait pas analyser ; avant le correctif : 17 refus sur 29). Le lendemain, les sous-agents qui avaient reçu leur consigne ont écrit dans leur fiche (voir plus haut).
 
-**Pas encore observé en conditions réelles** : la consigne redonnée au premier outil quand le hook de démarrage a été interrompu après l'avoir comptée (prouvée par bancs ; sa recherche a été vérifiée sur les conversations réelles : trouvée dans les 11 où elle a été reçue, absente de la douzième) ; la garde élargie aux sous-expressions et aux blocs sans effet, et `chercher` par identifiant (prouvés par bancs) ; la fiche rendue à un sous-agent Claude Code après un compactage de son contexte ; l'installation par `/plugin install` ; les hooks d'outils et de fin de tour quand le code vient de ce dépôt plutôt que de l'installation d'origine ; macOS et Linux (développé et testé sous Windows 11, Node 22). Les hooks de mémoire sont une réécriture, commune aux deux agents, de hooks utilisés au quotidien : sous cette forme, ils sont prouvés par bancs.
+**Pas encore observé en conditions réelles** : la boîte de signalements entre agents principaux (prouvée par bancs) ; la consigne redonnée au premier outil quand le hook de démarrage a été interrompu après l'avoir comptée (prouvée par bancs ; sa recherche a été vérifiée sur les conversations réelles : trouvée dans les 11 où elle a été reçue, absente de la douzième) ; la garde élargie aux sous-expressions et aux blocs sans effet, et `chercher` par identifiant (prouvés par bancs) ; la fiche rendue à un sous-agent Claude Code après un compactage de son contexte ; l'installation par `/plugin install` ; les hooks d'outils et de fin de tour quand le code vient de ce dépôt plutôt que de l'installation d'origine ; macOS et Linux (développé et testé sous Windows 11, Node 22). Les hooks de mémoire sont une réécriture, commune aux deux agents, de hooks utilisés au quotidien : sous cette forme, ils sont prouvés par bancs.
 
 Si vous constatez un écart, ouvrez un ticket avec le payload du hook : c'est lui qui tranche.
 
