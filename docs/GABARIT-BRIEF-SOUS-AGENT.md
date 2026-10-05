@@ -58,5 +58,7 @@ Décision déjà prise par l'utilisateur : ...
 
 - Preuves attendues : tests nommés, exécutés, avec leur résultat réel ; essai du parcours réel si possible, en distinguant ce qui est prouvé en local, en réel, et non fait.
 - Rapport final court : SHA des commits, fichiers touchés, tests lancés et résultat, restes, et ce qui attend l'orchestrateur.
+- Identité du livrable : ID de tâche et de tour, révision Git contrôlée, chemin du rapport final. Le parent dépose le reçu de traitement après avoir contrôlé les preuves. Ton ID de session n'est pas un SHA Git.
+- Écrire « livré, à vérifier par le parent », « partiel » ou « bloqué » selon l'état réel. Un compte rendu partiel ne devient pas fini parce que le processus s'arrête. Ne recommence pas une preuve encore valide après un compactage.
 - Couverture : fichiers lus en entier ou partiellement (plages de lignes) ; constats vus hors de ta mission, même si tu ne les traites pas.
 - Aucun secret recopié en clair dans le rapport.

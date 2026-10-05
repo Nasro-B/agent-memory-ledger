@@ -4,6 +4,7 @@ Les hooks enregistrent, rappellent et gardent. Ils ne remplacent pas la consigne
 
 - Claude Code : `<dossier du plugin>/scripts/claude/context-ledger.js`
 - Codex : `<dossier du dépôt>/scripts/codex/context-ledger.js`
+- Codex Home : `<dossier du dépôt>/scripts/codex-home/context-ledger.js`
 
 Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles ; le bloc reste utile pour qu'elles soient lues à chaque session.
 
@@ -20,7 +21,11 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   fait foi. Une seule source par problème.
 - Une ligne ne se retire que sur preuve : citer `[ctx C-NNNN]` dans l'entrée d'historique ou le message du
   commit qui décrit le travail fait ; `[ctx C-NNNN partiel]` si ce n'est pas fini. Aucune commande ne marque
-  « fait ».
+  « fait » sans preuve. Pour un rapport examiné, utiliser `traiter --projet P --session ID C-NNNN
+  --preuve "controle.md" --executant ID --verification "controle effectue" --resultat accepte` : le
+  fichier doit porter `statut: traite` et le marqueur exact. Un résultat partiel reste actif ; une livraison
+  rejetée exige `--reste C-NNNN` pointant un travail ouvert. Ne jamais assimiler livraison traitée et mission
+  entièrement résolue.
 - Jamais de modification à la main du dossier `contexte`. Une ligne n'est abandonnée que sur citation exacte
   d'un message de l'utilisateur écrit APRÈS la création de la ligne (commande `abandon`).
 - Sous-agents : chaque sous-agent lancé reçoit une ligne `[agent]`, marquée « TERMINÉ, résultat à traiter » à
@@ -47,7 +52,12 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   ce projet, puis rappelé avec ta liste tant que la ligne est ouverte : vérifie, ferme-la par ta preuve, ou dis à
   l'utilisateur pourquoi elle reste ouverte.
 - Après un compactage, à une reprise, et avant toute réponse « il ne reste que » : c'est cette liste qui fait
-  foi, pas le résumé de la conversation (`lister --projet P`).
+  foi, pas le résumé de la conversation (`lister --projet P --session ID`). Les rappels ne donnent aucun
+  ordre d'exécuter les autres missions du projet. Pour une reprise autorisée : `reprendre --projet P
+  --session ID C-NNNN`. Au Stop, un état inchangé des livraisons ne bloque pas à chaque tour.
+- Avant de relancer une mission : lire son dernier livrable et sa preuve. Réutiliser la vérification si son
+  périmètre et sa révision sont inchangés. Une relance doit nommer le manque concret à résoudre ; un rappel
+  de hook ne constitue pas une autorisation ni une raison de lancer un nouvel agent.
 
 ## Mémoire partagée
 

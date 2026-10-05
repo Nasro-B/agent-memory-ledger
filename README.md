@@ -8,7 +8,7 @@ Un agent de code oublie de cinq façons. Ce dépôt les ferme une par une, avec 
 | --- | --- |
 | Une demande faite il y a deux heures, disparue au compactage | Chaque message est enregistré mot pour mot sur disque, puis transformé en lignes de travail. Une ligne ne se retire que sur preuve écrite. |
 | Un message envoyé pendant que l'agent travaille | Il est enregistré au prochain événement et rappelé en fin de tour tant qu'il n'est pas trié. |
-| Le résultat d'un sous-agent, arrivé pendant un autre travail | Chaque sous-agent lancé devient une ligne. À sa fin elle passe à « résultat à traiter » : l'agent principal en est prévenu à son prochain outil, puis rappelé toutes les 20 minutes pendant un tour long, et à chaque fin de tour. |
+| Le résultat d'un sous-agent, arrivé pendant un autre travail | Chaque sous-agent lancé devient une ligne. À sa fin elle passe à « résultat à traiter » : l'agent principal en est prévenu à son prochain outil, puis rappelé toutes les 20 minutes pendant un tour long. Au Stop, un état inchangé n'est rappelé qu'une fois. |
 | La mission d'un sous-agent, quand SON contexte est compacté | Chaque sous-agent a sa fiche sur disque : sa mission mot pour mot et les notes qu'il y ajoute. Elle lui est rendue après un compactage de son contexte : c'est elle qui fait foi, pas le résumé. Avec Claude Code le hook copie la mission ; avec Codex, qui la chiffre, c'est à l'agent principal ou au sous-agent de l'y copier. |
 | Ce qui a été fait hier, par cet agent ou par un autre | Chaque commit est journalisé, l'état des dépôts est sauvé avant un compactage, et l'historique récent est réinjecté après. |
 
@@ -25,7 +25,9 @@ message de l'utilisateur ──► M-0042 (mot pour mot, « à trier »)
                              retirée de la liste, sur cette preuve
 ```
 
-Aucune commande ne marque une ligne « faite ». Il n'y a qu'un chemin : citer `[ctx C-NNNN]` là où le travail est décrit (entrée d'historique ou message de commit). Une garde refuse toute modification à la main de la liste, et une ligne effacée est restaurée depuis un journal en ajout seul.
+La commande `etat` ne marque jamais une ligne « faite ». Le marqueur `[ctx C-NNNN]` dans un historique ou un commit reste compatible. Pour un rapport examiné, `traiter` exige un fichier portant le statut et le marqueur exacts ; il conserve l'exécutant, le vérificateur et le SHA-256 de la preuve. Les exemples, citations et mentions de travail non terminé ne valent pas clôture. Une garde refuse toute modification à la main de la liste, et une ligne effacée est restaurée depuis un journal en ajout seul.
+
+Les rappels automatiques portent sur la conversation courante. Les autres missions restent sur disque ; `reprendre --session <ID> C-NNNN` les rattache explicitement à une reprise. Un événement de fin reçu deux fois ne recrée pas un travail déjà traité. Le fonctionnement et les limites sont décrits dans [docs/CLOTURE-ET-REPRISE.md](docs/CLOTURE-ET-REPRISE.md).
 
 La mémoire a trois étages, communs à tous les agents :
 
@@ -61,6 +63,8 @@ L'installateur ne modifie ni ne déplace aucun hook existant : il ajoute les sie
 
 Pour retirer : `node scripts/installer-codex.js --retirer --appliquer`. Pour un autre dossier de configuration : `--home <dossier>` (ou la variable `CODEX_HOME`).
 
+Avec un dossier nommé `.codex-home`, l'installateur utilise l'identité `codex-home` et son point d'entrée dédié. Les comptes, configurations et historiques des deux homes restent séparés.
+
 ### Les règles à donner à l'agent
 
 Les hooks enregistrent, rappellent et gardent. L'agent doit savoir quoi en faire. Copiez dans vos fichiers d'instructions le bloc de [docs/REGLES-POUR-AGENTS.md](docs/REGLES-POUR-AGENTS.md). Sans lui, l'agent voit la liste mais ne sait pas qu'elle fait foi.
@@ -71,11 +75,13 @@ Les hooks affichent toujours la commande exacte, avec le bon chemin et le bon pr
 
 ```
 node "<script>" ajouter --projet P --de M-0042 "texte mot pour mot"   # un message devient une ligne de travail
-node "<script>" ajouter --projet P "problème trouvé en route"         # une ligne sans message d'origine
+node "<script>" ajouter --projet P --session ID "problème trouvé en route"
 node "<script>" sans-travail --projet P M-0042 "simple question"      # un message qui ne demande aucun travail
 node "<script>" etat --projet P C-0107 en-cours|bloque-utilisateur|ouvert "note"
 node "<script>" abandon --projet P C-0107 "citation exacte de l'utilisateur"
-node "<script>" lister --projet P
+node "<script>" lister --projet P --session ID
+node "<script>" reprendre --projet P --session ID C-0107
+node "<script>" traiter --projet P --session ID C-0107 --preuve "controle.md" --executant ID --verification "sources et tests controles" --resultat accepte
 ```
 
 Lecture seule, et commandes ouvertes aux sous-agents :
@@ -139,11 +145,11 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 
 | Événement | Liste de travail | Mémoire |
 | --- | --- | --- |
-| Début de session | réinjecte ce qui reste, avec les signalements d'un autre agent sur des lignes encore ouvertes | règles du projet, résumé, journaux récents, alerte de travail non documenté |
+| Début de session | réinjecte les demandes et travaux rattachés à cette conversation | règles du projet, résumé, journaux récents, alerte de travail non documenté |
 | Message de l'utilisateur | enregistre mot pour mot | |
 | Avant un outil | refuse l'écriture à la main dans la liste ; pour un sous-agent : lecture permise, écriture refusée | |
 | Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et ceux d'un autre agent principal, rappelle les résultats qui attendent, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) ; pour un sous-agent : lui rend sa fiche après un compactage de son contexte, ou lui donne sa consigne si son démarrage a manqué | journalise les commits, compte les fichiers modifiés |
-| Fin de tour | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités | point de contrôle toutes les deux heures |
+| Fin de tour | rappel borné par message humain et par état des livraisons ; un état inchangé ne provoque pas de nouvelle continuation | point de contrôle toutes les deux heures |
 | Démarrage d'un sous-agent | crée sa fiche et lui donne sa consigne | |
 | Fin d'un sous-agent | marque son résultat « à traiter » | |
 | Avant compactage | | sauve l'état des dépôts |
@@ -171,10 +177,11 @@ Pour connaître la forme et la durée réelles des événements que vos agents e
 
 Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 
-**Par bancs de tests** (sans modèle, payloads simulés) : 163 tests, tous verts.
+**Par bancs de tests** (sans modèle, payloads simulés) : les bancs historiques et leurs mutations sont complétés par `tests/anti-boucle.test.js`. Les nombres exacts et le résultat se lisent dans la sortie de la commande exécutée.
 
 | Banc | Tests | Couvre |
 | --- | --- | --- |
+| `tests/anti-boucle.test.js` | 21 | perte de preuve, répétition des fins, périmètre de session, reçus et trois adaptateurs |
 | `tests/context-ledger-claude.test.js` | 84 | noyau et adaptateur Claude Code |
 | `tests/context-ledger-codex.test.js` | 59 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
 | `tests/memoire.test.js` | 14 | hooks de mémoire, détection de projet, installateur Codex |
@@ -223,7 +230,7 @@ Les deux vérifient aussi la version du plugin : la même dans le manifeste, dan
 - Seul l'agent principal écrit dans la liste. Un sous-agent lancé par un sous-agent n'est pas suivi : celui qui l'a lancé rend compte. Il a sa fiche, mais ses signalements ne sont pas relayés à l'agent principal.
 - Codex : la mission d'un sous-agent est chiffrée partout où un hook peut la lire. C'est donc au sous-agent de la recopier dans sa fiche ; s'il ne l'a pas fait, sa fiche rendue après un compactage lui dit de la reprendre de son brief en fichier (sinon du résumé) et de le dire dans son rapport. Deux parades, côté agent principal : donner aussi la mission dans un fichier du dossier de travail, que le sous-agent pourra relire ; et copier ce fichier dans la fiche du sous-agent (`note --fiche <ID> --genre mission --fichier <brief>`), pour que la fiche rendue porte la mission.
 - Garde : un sous-agent lit la liste par une commande simple : un fichier nommé, une sous-expression de lecture (`(Get-Content x).Count`), un bloc sans effet en fin de pipeline (`ForEach-Object { $_.Line }`, `ForEach-Object { '{0}: {1}' -f $_.LineNumber, $_.Line }`, `Where-Object { $_.Name -like 'C-*' }`), ou la commande `chercher`. Une boucle, l'affectation du résultat d'une commande, un appel de bibliothèque, un appel de méthode ou une chaîne seule (en bash, elle s'exécute) sont refusés, parce que la garde ne sait pas prouver qu'ils n'écrivent pas ; de même une variable passée à une commande qui reçoit un pipeline, qui pourrait porter un bloc exécuté pour chaque objet. Le refus dit quoi utiliser à la place, dont `chercher C-0151 C-0152` pour lire plusieurs lignes.
-- Codex : le rappel de fin de tour passe par un blocage du Stop : il fait continuer le tour une fois.
+- Codex : le rappel de fin de tour passe par un blocage du Stop, une fois par message humain ou état des livraisons. Une tâche encore ouverte reste conservée ; l'absence de nouveau blocage ne signifie pas qu'elle est faite.
 - Claude Code : le filet qui donne sa consigne à un sous-agent à son premier outil ne joue que pour les outils que le hook écoute (écriture de fichier, shell, lancement d'agent). Un sous-agent qui ne fait que lire ne la reçoit que par l'événement de démarrage.
 - Codex : le filet « travail non commité » tourne à chaque fin de tour, parce que le délai de son événement de fin de session (une seconde par défaut, trois au plus) est trop court. Il n'écrit qu'une entrée par état.
 - Claude Code : le filet de fin de session peut être annulé quand la session se ferme très vite (constaté une fois : « Hook cancelled »). Rien n'est perdu : le marqueur de travail non documenté reste, et l'alerte s'affiche au démarrage suivant.

@@ -27,7 +27,12 @@
 // UserPromptSubmit n'a pas déjà enregistrés.
 
 const crypto = require('crypto');
+const config = require('../lib/config.js');
 const core = require('../lib/context-ledger-core.js');
+
+function reconcilierContenu() {
+  return core.reconcilierDansHook({ agent: AGENT, base: process.env.CONTEXT_LEDGER_PREUVES_DIR || config.maison() });
+}
 
 const AGENT = core.agentDepuisChemin(__dirname);
 const SCRIPT = __filename;
@@ -226,7 +231,9 @@ function tacheLancee(input) {
 // Fin d'une tâche suivie. reprise = true seulement pour un événement reçu en direct (SubagentStop) : le
 // transcript et les tours de notification peuvent revoir une fin déjà traitée.
 function marquerFin(input, id, statut, reprise = false) {
-  return core.finirTache({ agent: AGENT, sessionId: input.session_id, id, statut, reprise });
+  return core.finirTache({ agent: AGENT, sessionId: input.session_id, id, statut, reprise,
+    resultat: input.agent_transcript_path, livraisonId: input.turn_id || input.tool_use_id,
+    dernierMessage: input.last_assistant_message });
 }
 
 // Ce que l'orchestrateur doit lire avant la fin du tour : fins pas encore annoncées (SubagentStop marque
@@ -281,6 +288,7 @@ function texteMessagesEnFile(bilan) {
 }
 
 function surUserPromptSubmit(input) {
+  try { reconcilierContenu(); } catch (_) { /* prochain evenement */ }
   const prompt = typeof input.prompt === 'string' ? input.prompt : '';
   if (!prompt.trim()) return;
   // UserPromptSubmit se déclenche aussi pour les tours injectés : ce ne sont pas des messages de l'utilisateur.
@@ -323,7 +331,7 @@ function surUserPromptSubmit(input) {
       try { fichierSecours = core.secours({ agent: AGENT, sessionId: input.session_id, promptId: input.prompt_id, texte: prompt, erreur }); } catch (_) { /* rien */ }
       let projet = '_general';
       try { projet = core.projetDeSession(AGENT, input.session_id, input.cwd); } catch (_) { /* repli */ }
-      sortir('UserPromptSubmit', core.contexteEchecMessage({ agent: AGENT, projet, script: SCRIPT, erreur, fichierSecours }));
+      sortir('UserPromptSubmit', core.contexteEchecMessage({ agent: AGENT, projet, script: SCRIPT, erreur, fichierSecours, sessionId: input.session_id }));
       return;
     }
     // Même prompt_id que le tour en cours : message envoyé pendant ce tour, il s'y ajoute au lieu de le remplacer.
@@ -336,18 +344,19 @@ function surUserPromptSubmit(input) {
     return;
   }
   sortir('UserPromptSubmit', ajuster(
-    [enFile, core.contexteMessage({ agent: AGENT, projet: r.projet, idMessage: r.id, script: SCRIPT })].filter(Boolean).join('\n'),
-    REGLE_6BIS, core.commandes(SCRIPT, r.projet).lister)); // ancre-mutation:regle-6bis-message
+    [enFile, core.contexteMessage({ agent: AGENT, projet: r.projet, idMessage: r.id, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'),
+    REGLE_6BIS, core.commandes(SCRIPT, r.projet, input.session_id).lister)); // ancre-mutation:regle-6bis-message
 }
 
 function surSessionStart(input) {
+  try { reconcilierContenu(); } catch (_) { /* prochain evenement */ }
   const projet = core.lierSession(AGENT, input.session_id, input.cwd);
   let file = { ids: [], echecs: [], projet: null };
   try { file = rattraperMessagesEnFile(input); } catch (_) { /* la vue reste injectée */ }
   core.assurerVues(AGENT);
   sortir('SessionStart', ajuster(
-    [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT })].filter(Boolean).join('\n'),
-    REGLE_6BIS, core.commandes(SCRIPT, projet).lister)); // ancre-mutation:regle-6bis-session
+    [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'),
+    REGLE_6BIS, core.commandes(SCRIPT, projet, input.session_id).lister)); // ancre-mutation:regle-6bis-session
 }
 
 // Réponses de l'utilisateur à un questionnaire (outil AskUserQuestion) : ce sont ses décisions, mais elles ne
@@ -398,6 +407,12 @@ function surPostToolUse(input) {
     toolName: input.tool_name, toolInput: input.tool_input, toolResponse: input.tool_response, cwd: input.cwd,
   });
   let resultat = p ? core.appliquerPreuves({ agent: AGENT, marqueurs: p.marqueurs, preuve: p.preuve }) : null;
+  try {
+    const r = reconcilierContenu();
+    if (!resultat) resultat = r;
+    else for (const k of ['faits', 'partiels', 'ignores', 'projets']) resultat[k] = [...new Set([...resultat[k], ...r[k]])];
+  } catch (_) { /* la file durable sera rejouee */ }
+  const preuve = p ? p.preuve : 'fichier de preuve (historique ou memoire)';
   if (resultat && !resultat.faits.length && !resultat.partiels.length) resultat = null;
   // Après les preuves : un résultat que cet outil vient de prouver traité n'est plus annoncé.
   const courts = [suivi, suiviEnCours(input)].filter(Boolean).join('\n');
@@ -409,20 +424,20 @@ function surPostToolUse(input) {
   }
   const projet = file.projet || core.projetDeSession(AGENT, input.session_id, input.cwd);
   if (!enFile) {
-    sortir('PostToolUse', [courts, core.contexteApresPreuve({ agent: AGENT, projet, script: SCRIPT, resultat, preuve: p.preuve })].filter(Boolean).join('\n'));
+    sortir('PostToolUse', [courts, core.contexteApresPreuve({ agent: AGENT, projet, script: SCRIPT, resultat, preuve, sessionId: input.session_id })].filter(Boolean).join('\n'));
     return;
   }
   const haut = [
     courts,
-    resultat && resultat.faits.length ? `Retiré sur preuve (${p.preuve}) : ${resultat.faits.join(', ')}.` : '',
-    resultat && resultat.partiels.length ? `Passé en-cours (partiel, ${p.preuve}) : ${resultat.partiels.join(', ')}.` : '',
+    resultat && resultat.faits.length ? `Retiré sur preuve (${preuve}) : ${resultat.faits.join(', ')}.` : '',
+    resultat && resultat.partiels.length ? `Passé en-cours (partiel, ${preuve}) : ${resultat.partiels.join(', ')}.` : '',
     enFile,
   ].filter(Boolean).join('\n');
   const dernier = file.ids[file.ids.length - 1];
   const corps = dernier
-    ? core.contexteMessage({ agent: AGENT, projet, idMessage: dernier, script: SCRIPT })
-    : core.contexteSession({ agent: AGENT, projet, script: SCRIPT });
-  sortir('PostToolUse', ajuster(`${haut}\n${corps}`, REGLE_6BIS, core.commandes(SCRIPT, projet).lister));
+    ? core.contexteMessage({ agent: AGENT, projet, idMessage: dernier, script: SCRIPT, sessionId: input.session_id })
+    : core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id });
+  sortir('PostToolUse', ajuster(`${haut}\n${corps}`, REGLE_6BIS, core.commandes(SCRIPT, projet, input.session_id).lister));
 }
 
 function surStop(input) {
@@ -430,6 +445,7 @@ function surStop(input) {
   let file = { ids: [], echecs: [], projet: null };
   try { file = rattraperMessagesEnFile(input); } catch (_) { /* rien */ }
   if (input.stop_hook_active) return;
+  try { reconcilierContenu(); } catch (_) { /* prochain evenement */ }
   core.assurerVues(AGENT);
   const texte = core.rappelStop({
     agent: AGENT, sessionId: input.session_id, promptId: input.prompt_id,

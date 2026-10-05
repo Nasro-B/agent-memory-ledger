@@ -72,6 +72,7 @@ function hook(dir, payload) {
 }
 
 function cli(dir, args) {
+  if (args[0] === 'ajouter' && !args.includes('--session')) args = [...args, '--session', 'sess-1'];
   const r = spawnSync(process.execPath, [HOOK, ...args], {
     env: envPour(dir), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
   });
@@ -168,7 +169,7 @@ test('message humain : M créé mot pour mot', () => {
   // Un sous-agent peut lire ce texte sans en être le destinataire (chez Codex il démarre avec une copie de
   // la conversation du parent) : la deuxième ligne dit à qui il s'adresse.
   assert.match(ctx, /^Fichier contexte \(projet projet-demo, agent claude\) : .+\nPour l'orchestrateur seulement \(un sous-agent qui lit ceci s'en tient à sa mission\)\.\n/);
-  assert.ok(ctx.includes(`ajouter --projet ${PROJET} --de M-0001 "texte mot pour mot"`));
+  assert.ok(ctx.includes(`ajouter --projet ${PROJET} --session sess-1 --de M-0001 "texte mot pour mot"`));
   assert.ok(ctx.includes(`sans-travail --projet ${PROJET} M-0001 "raison courte"`));
   assert.ok(ctx.includes('[ctx C-NNNN partiel]'));
   const e = etat(dir);
@@ -731,14 +732,14 @@ test('règle des découvertes en route : vue au message, au démarrage et après
     assert.match(s, /Ce fichier fait foi pour ce qui reste, pas le résumé de compactage\./);
   }
   avecRacine(dir, () => {
-    for (let i = 0; i < 150; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `ligne ${i} ` + 'x'.repeat(600), de: null });
+    for (let i = 0; i < 150; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `ligne ${i} ` + 'x'.repeat(600), de: null, sessionId: 'sess-1' });
   });
   // Au plafond : la règle et les consignes restent, des lignes « - » partent, et leur compte reste annoncé.
   const plein = contexte(ups(dir, 'Second message', { prompt_id: 'p-2' }));
   assert.ok(plein.length <= 9000, `longueur ${plein.length}`);
   assert.ok(plein.endsWith(REGLE));
   assert.match(plein, /Nouveau message M-0002\. Avant d'agir/);
-  const annonce = /\((\d+) lignes de plus : node ".*context-ledger\.js" lister --projet projet-demo\)/.exec(plein);
+  const annonce = /\((\d+) lignes de plus : node ".*context-ledger\.js" lister --projet projet-demo --session sess-1\)/.exec(plein);
   assert.ok(annonce, 'les lignes omises doivent être annoncées');
   const montrees = plein.split('\n').filter(l => l.startsWith('- ')).length;
   assert.equal(montrees + Number(annonce[1]), 150 + 2, 'lignes montrées + lignes annoncées = 150 lignes C + 2 messages à trier');
@@ -751,13 +752,13 @@ test('règle des découvertes en route : vue au message, au démarrage et après
 test('sortie additionalContext <= 9 000 caractères, texte long tronqué avec renvoi', () => {
   const dir = dossier('plafond');
   avecRacine(dir, () => {
-    for (let i = 0; i < 150; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `ligne ${i} ` + 'x'.repeat(600), de: null });
+    for (let i = 0; i < 150; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `ligne ${i} ` + 'x'.repeat(600), de: null, sessionId: 'sess-1' });
   });
   const long = 'Demande très longue ' + 'y'.repeat(20000);
   const r = ups(dir, long);
   const ctx = contexte(r);
   assert.ok(ctx.length <= 9000, `longueur ${ctx.length}`);
-  assert.match(ctx, /lignes de plus : node ".*context-ledger\.js" lister --projet projet-demo\)/);
+  assert.match(ctx, /lignes de plus : node ".*context-ledger\.js" lister --projet projet-demo --session sess-1\)/);
   assert.match(ctx, /Nouveau message M-0001\. Avant d'agir/);
   assert.equal(etat(dir).demandes['M-0001'].texte, long);
   const s = hook(dir, { hook_event_name: 'SessionStart', session_id: 'sess-1', cwd: CWD_PROJET, source: 'compact' });
@@ -777,7 +778,9 @@ test('SessionStart : lie la session et réinjecte la vue', () => {
   const r = hook(dir, { hook_event_name: 'SessionStart', session_id: 'sess-neuve', cwd: CWD_PROJET, source: 'startup' });
   const ctx = contexte(r);
   assert.equal(r.json.hookSpecificOutput.hookEventName, 'SessionStart');
-  assert.match(ctx, /C-0001/);
+  assert.ok(!ctx.includes('- C-0001 |'), 'une nouvelle conversation ne reprend pas une autre mission');
+  assert.equal(cli(dir, ['reprendre', '--projet', PROJET, '--session', 'sess-neuve', 'C-0001']).code, 0);
+  assert.match(contexte(hook(dir, { hook_event_name: 'SessionStart', session_id: 'sess-neuve', cwd: CWD_PROJET, source: 'resume' })), /C-0001/);
   const s = JSON.parse(fs.readFileSync(path.join(dir, '.sessions', 'claude-sess-neuve.json'), 'utf8'));
   assert.equal(s.projet, PROJET);
   hook(dir, { hook_event_name: 'SessionStart', session_id: 'sess-neuve', cwd: 'C:\\tmp', source: 'compact' });
@@ -959,7 +962,7 @@ test('UserPromptSubmit : verrou bloqué, message conservé en secours et signal�
   fs.unlinkSync(verrou);
   const ctx = contexte(r);
   assert.match(ctx, /n'a PAS pu être enregistré/);
-  assert.match(ctx, /ajouter --projet projet-demo "texte mot pour mot"/);
+  assert.match(ctx, /ajouter --projet projet-demo --session sess-1 "texte mot pour mot"/);
   const secours = fs.readFileSync(path.join(dir, '.secours-claude.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
   assert.equal(secours[0].texte, 'Pendant le verrou : ajoute le test X');
 });
@@ -968,7 +971,7 @@ test('Stop : 800 lignes du tour, sortie <= 9 000 et commande etat lisible', () =
   const dir = dossier('stop-plafond');
   ups(dir, 'Fais tout');
   avecRacine(dir, () => {
-    for (let i = 0; i < 800; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `l${i}`, de: null });
+    for (let i = 0; i < 800; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `l${i}`, de: null, sessionId: 'sess-1' });
   });
   const r = hook(dir, { hook_event_name: 'Stop', session_id: 'sess-1', prompt_id: 'p-1', stop_hook_active: false, last_assistant_message: '' });
   const ctx = contexte(r);
@@ -1342,7 +1345,7 @@ test('copie de secours : chaque écriture du journal est recopiée ; racine effa
     assert.equal(e.lignes['C-0002'].statut, 'fait');
     assert.equal(e.demandes['M-0001'].texte, 'Corrige le bouton de paiement');
     assert.equal(e.demandes['M-0002'].texte, 'Message après le sinistre', 'la numérotation reprend sans rien écraser');
-    assert.match(contexte(r), /- C-0001 \|/);
+    assert.ok(!contexte(r).includes('- C-0001 |'), 'restauree sur disque, sans assigner la mission a une nouvelle conversation');
     assert.ok(vue(dir).includes('- C-0001 |'));
     assert.ok(journal(dir).some(j => j.evt === 'restauration-journal' && j.raison === 'journal principal absent'));
     // Journal seul supprimé (état intact) : rétabli en entier à l'écriture suivante.
@@ -1488,7 +1491,7 @@ function finDeTour(dir, t, promptId, reponse, actif = false) {
   return hook(dir, { hook_event_name: 'Stop', session_id: 'sess-1', prompt_id: promptId, transcript_path: t, stop_hook_active: actif, last_assistant_message: reponse });
 }
 
-test('sous-agent en arrière-plan : une ligne le suit, sa fin la marque « à traiter », le rappel revient à chaque fin de tour', () => {
+test('sous-agent en arrière-plan : une ligne le suit, sa fin la marque « à traiter », un état inchangé ne bloque pas chaque tour', () => {
   const dir = dossier('livraisons');
   const t = transcriptDe('livraisons');
   ups(dir, 'Lance deux agents et continue le reste', { transcript_path: t });
@@ -1516,9 +1519,9 @@ test('sous-agent en arrière-plan : une ligne le suit, sa fin la marque « à tr
   }).out, '');
   e = etat(dir);
   assert.equal(e.lignes['C-0001'].statut, 'ouvert');
-  assert.match(e.lignes['C-0001'].note, /^TERMINÉ \(terminé\) le \d{4}-[\d: -]+ : résultat à lire, vérifier et intégrer : C:\\tmp\\tasks\\a1111111111111111\.output$/);
+  assert.match(e.lignes['C-0001'].note, /^TERMINÉ \(terminé\) le \d{4}-[\d: -]+ : résultat à lire, vérifier et intégrer : C:\\tmp\\a1\.jsonl$/);
   // SubagentStop ne dit rien à l'orchestrateur : la fin lui est annoncée à son prochain outil, une seule fois.
-  assert.match(contexte(postBash(dir, t)), /^Sous-agent\(s\) terminé\(s\), résultat à traiter : C-0001 « Lot A : export PDF » \(résultat : C:\\tmp\\tasks\\a1111111111111111\.output\)\. Ne les oublie pas/);
+  assert.match(contexte(postBash(dir, t)), /^Sous-agent\(s\) terminé\(s\), résultat à traiter : C-0001 « Lot A : export PDF » \(résultat : C:\\tmp\\a1\.jsonl\)\. Ne les oublie pas/);
   assert.equal(postBash(dir, t).out, '');
   // Le second finit aussi ; seule la notification écrite dans le transcript le dit (filet de SubagentStop).
   fs.appendFileSync(t, JSON.stringify({ type: 'attachment', isSidechain: false, attachment: { type: 'queued_command', prompt: notificationFin('a2222222222222222'), commandMode: 'task-notification' } }) + '\n');
@@ -1528,14 +1531,14 @@ test('sous-agent en arrière-plan : une ligne le suit, sa fin la marque « à tr
   ups(dir, 'Maintenant corrige le readme', { prompt_id: 'p-2', transcript_path: t });
   cli(dir, ['sans-travail', '--projet', PROJET, 'M-0002', 'fait dans le tour']);
   const r1 = contexte(finDeTour(dir, t, 'p-2', 'Readme corrigé.'));
-  assert.match(r1, /^Sous-agents TERMINÉS dont le résultat n'est pas traité \(2\) : C-0001 « Lot A : export PDF » \(résultat : C:\\tmp\\tasks\\a1111111111111111\.output\) ; C-0002 « Lot B : droits »/);
+  assert.match(r1, /^Sous-agents TERMINÉS dont le résultat n'est pas traité \(2\) : C-0001 « Lot A : export PDF » \(résultat : C:\\tmp\\a1\.jsonl\) ; C-0002 « Lot B : droits »/);
   assert.match(r1, /cite \[ctx C-NNNN\] dans l'historique/);
   // Relance juste après le rappel (stop_hook_active) : rien, donc pas de boucle.
   assert.equal(finDeTour(dir, t, 'p-2', 'Readme corrigé.', true).out, '');
   // Encore un tour sans les traiter : le rappel REVIENT (une notification, elle, ne revient jamais).
   ups(dir, 'Et le changelog', { prompt_id: 'p-3', transcript_path: t });
   cli(dir, ['sans-travail', '--projet', PROJET, 'M-0003', 'fait dans le tour']);
-  assert.match(contexte(finDeTour(dir, t, 'p-3', 'Changelog fait.')), /n'est pas traité \(2\) : C-0001/);
+  assert.equal(finDeTour(dir, t, 'p-3', 'Changelog fait.').out, '', 'livraison inchangee : pas de nouvelle relance');
   // La première livraison est vérifiée et prouvée : elle sort du rappel.
   postWrite(dir, histoire(dir), '- résultat de Lot A vérifié et intégré [ctx C-0001]\n', { transcript_path: t });
   ups(dir, 'Suite', { prompt_id: 'p-4', transcript_path: t });
@@ -1585,9 +1588,9 @@ test('sous-agent repris après la clôture de sa ligne : une nouvelle ligne suit
   ups(dir, 'Lance un agent', { transcript_path: t });
   cli(dir, ['sans-travail', '--projet', PROJET, 'M-0001', 'suivi par la ligne de l\'agent']);
   lancementAgent(dir, 'a4444444444444444', 'Audit des prix', { transcript_path: t });
-  const finEnDirect = () => hook(dir, {
+  const finEnDirect = (tour = 'tour-1') => hook(dir, {
     hook_event_name: 'SubagentStop', session_id: 'sess-1', agent_id: 'a4444444444444444', agent_type: 'general-purpose',
-    stop_hook_active: false, transcript_path: t,
+    stop_hook_active: false, transcript_path: t, last_assistant_message: tour,
   });
   finEnDirect();
   assert.match(etat(dir).lignes['C-0001'].note, /^TERMINÉ/);
@@ -1603,7 +1606,7 @@ test('sous-agent repris après la clôture de sa ligne : une nouvelle ligne suit
   assert.equal(ups(dir, notificationFin('a4444444444444444'), { prompt_id: 'p-n', transcript_path: t }).out, '');
   assert.deepEqual(Object.keys(etat(dir).lignes), ['C-0001']);
   // L'agent est relancé et finit de nouveau (événement reçu en direct) : son nouveau résultat est suivi.
-  finEnDirect();
+  finEnDirect('tour-2');
   const e = etat(dir);
   assert.deepEqual(Object.keys(e.lignes), ['C-0001', 'C-0002']);
   assert.match(e.lignes['C-0002'].texte, /^\[agent\] « Audit des prix » \(general-purpose, a4444444444444444\) : nouveau résultat rendu après la clôture de C-0001, à lire, vérifier et intégrer\.$/);

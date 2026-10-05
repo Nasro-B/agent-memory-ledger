@@ -1,6 +1,6 @@
 {
   "name": "agent-memory-ledger",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Mémoire partagée et liste de travail pour agents de code (Claude Code et Codex).",
   "private": true,
   "license": "MIT",
@@ -12,8 +12,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
-    "test:rapide": "node --test --test-concurrency=1 --test-skip-pattern=\"^mutation\" tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
+    "test": "node --test --test-concurrency=1 tests/anti-boucle.test.js tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
+    "test:rapide": "node --test --test-concurrency=1 --test-skip-pattern=\"^mutation\" tests/anti-boucle.test.js tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
     "verifier": "node scripts/verifier-public.js"
   }
 }

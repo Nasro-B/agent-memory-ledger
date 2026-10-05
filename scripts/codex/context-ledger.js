@@ -2,7 +2,7 @@
 'use strict';
 // context-ledger.js : adaptateur CODEX du fichier contexte (liste de travail sur disque)
 // + point d'entrée de la CLI. Noyau partagé avec Claude Code : ../lib/context-ledger-core.js.
-// L'agent est déduit de l'emplacement de CE script (__dirname), jamais du payload ni de CODEX_HOME.
+// L'agent est déduit du point d'entrée exécuté, jamais du payload ni de CODEX_HOME.
 //
 // Sorties : JSON STRICT conforme au schéma embarqué de codex-cli 0.155.0-alpha.16
 // (additionalProperties:false, un champ en trop invalide toute la sortie) :
@@ -38,8 +38,8 @@ const fs = require('fs');
 const core = require('../lib/context-ledger-core.js');
 const config = require('../lib/config.js');
 
-const AGENT = core.agentDepuisChemin(__dirname);
-const SCRIPT = __filename;
+const SCRIPT = require.main.filename;
+const AGENT = core.agentDepuisChemin(path.dirname(SCRIPT));
 const PLAFOND = core.PLAFOND;
 
 const PREFIXES_NON_HUMAINS = ['<task-notification>', '<hook_prompt', 'Message Type:', '<subagent_notification', '<turn_aborted>'];
@@ -265,7 +265,7 @@ function lancerBaseDetachee() {
     try { fs.closeSync(fs.openSync(m, 'wx')); } catch (_) { return; }
   }
   const { spawn } = require('child_process');
-  const c = spawn(process.execPath, [__filename, '--reconcilier-base'], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
+  const c = spawn(process.execPath, [SCRIPT, '--reconcilier-base'], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
   c.on('error', () => { try { fs.unlinkSync(m); } catch (_) { /* rien */ } }); // sinon exception non rattrapée : exit 1
   c.unref();
 }
@@ -447,7 +447,7 @@ function surSubagentStop(input) {
   const rollout = input.agent_transcript_path || '';
   const s = core.lireSession(AGENT, input.session_id);
   if (!(s && s.taches && s.taches[String(input.agent_id)])) suivreSousAgent(input, rollout);
-  core.finirTache({ agent: AGENT, sessionId: input.session_id, id: String(input.agent_id), statut: 'terminé', resultat: rollout, reprise: true }); // ancre-mutation:suivi-fin
+  core.finirTache({ agent: AGENT, sessionId: input.session_id, id: String(input.agent_id), statut: 'terminé', resultat: rollout, reprise: true, livraisonId: input.turn_id || input.tool_use_id, dernierMessage: input.last_assistant_message }); // ancre-mutation:suivi-fin
 }
 
 // Une ligne du rollout de l'orchestrateur -> chemin du sous-agent qui rend sa réponse finale, sinon null.
@@ -502,8 +502,8 @@ function surSessionStart(input) {
   try { reconcilier(); } catch (_) { /* la vue reste injectée */ }
   core.assurerVues(AGENT);
   prendreDrapeau(input.session_id);
-  const cmd = core.commandes(SCRIPT, projet);
-  contexte('SessionStart', ajuster(suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT }), REGLE_6BIS, cmd.lister));
+  const cmd = core.commandes(SCRIPT, projet, input.session_id);
+  contexte('SessionStart', ajuster(suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id }), REGLE_6BIS, cmd.lister));
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +592,7 @@ function signalerEchec(input, m, erreur) {
   try { fichierSecours = core.secours({ agent: AGENT, sessionId: m.sessionId, promptId: m.cle, texte: m.texte, erreur }); } catch (_) { /* rien */ }
   let projet = '_general';
   try { projet = core.projetDeSession(AGENT, input.session_id, input.cwd); } catch (_) { /* repli */ }
-  let texte = core.contexteEchecMessage({ agent: AGENT, projet, script: SCRIPT, erreur, fichierSecours });
+  let texte = core.contexteEchecMessage({ agent: AGENT, projet, script: SCRIPT, erreur, fichierSecours, sessionId: input.session_id });
   if (!fichierSecours) texte = plafonner(`${texte}\nTexte du message (mot pour mot) : ${m.texte}`);
   contexte('UserPromptSubmit', texte);
 }
@@ -624,14 +624,14 @@ function surUserPromptSubmit(input) {
   core.assurerVues(AGENT);
   const drapeau = prendreDrapeau(input.session_id);
   const projet = enr ? enr.projet : core.projetDeSession(AGENT, input.session_id, input.cwd);
-  const cmd = core.commandes(SCRIPT, projet);
+  const cmd = core.commandes(SCRIPT, projet, input.session_id);
   const haut = [drapeau ? APRES_COMPACTAGE : '', ligneResultat(r), fins,
     enAttente ? 'Message de l\'utilisateur reçu mais fichier contexte occupé : il est gardé en attente et sera enregistré (M-NNNN) au prochain événement. Traite-le comme un message à trier.' : '',
   ].filter(Boolean).join('\n');
   if (enr && enr.id && !enr.doublon) {
-    contexte('UserPromptSubmit', ajuster(haut, core.contexteMessage({ agent: AGENT, projet, idMessage: enr.id, script: SCRIPT }), REGLE_6BIS, cmd.lister));
+    contexte('UserPromptSubmit', ajuster(haut, core.contexteMessage({ agent: AGENT, projet, idMessage: enr.id, script: SCRIPT, sessionId: input.session_id }), REGLE_6BIS, cmd.lister));
   } else if (drapeau || enAttente || a_change(r) || fins) {
-    contexte('UserPromptSubmit', ajuster(haut, core.contexteSession({ agent: AGENT, projet, script: SCRIPT }), drapeau || enAttente ? REGLE_6BIS : '', cmd.lister));
+    contexte('UserPromptSubmit', ajuster(haut, core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id }), drapeau || enAttente ? REGLE_6BIS : '', cmd.lister));
   }
 }
 
@@ -654,13 +654,13 @@ function surPostToolUse(input) {
     return;
   }
   const projet = core.projetDeSession(AGENT, input.session_id, input.cwd);
-  const cmd = core.commandes(SCRIPT, projet);
+  const cmd = core.commandes(SCRIPT, projet, input.session_id);
   if (drapeau) {
     const haut = [APRES_COMPACTAGE, ligneResultat(total), fins].filter(Boolean).join('\n');
-    contexte('PostToolUse', ajuster(haut, core.contexteSession({ agent: AGENT, projet, script: SCRIPT }), REGLE_6BIS, cmd.lister));
+    contexte('PostToolUse', ajuster(haut, core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id }), REGLE_6BIS, cmd.lister));
   } else {
     contexte('PostToolUse', ajuster(fins, core.contexteApresPreuve({
-      agent: AGENT, projet, script: SCRIPT, resultat: total, preuve: total.preuves.join(' ; '),
+      agent: AGENT, projet, script: SCRIPT, resultat: total, preuve: total.preuves.join(' ; '), sessionId: input.session_id,
     }), '', cmd.lister));
   }
 }
@@ -675,7 +675,7 @@ function surPostCompact(input) {
 //  - le rappel du noyau (M du tour à trier, lignes du tour ni faites ni citées) ;
 //  - sinon, les M de CETTE session encore à trier (ex. un premier message suivi d'un second dans le même
 //    tour : le noyau ne suit que le dernier) ;
-//  - à CHAQUE fin de tour, les sous-agents terminés dont le résultat n'est ni prouvé traité ni cité ;
+//  - une fois par état des livraisons, les résultats encore non traités ;
 //  - et, dès qu'il rappelle quelque chose, la vue compacte (à trier, ouvert, bloqué), plafonnée.
 
 // M de CETTE session encore à trier, rappelés une fois par message humain ('' s'il n'y a rien à rappeler).
@@ -716,13 +716,13 @@ function surStop(input) {
   const s = core.lireSession(AGENT, input.session_id);
   if (!s || !s.projet) return;
   const projet = s.projet;
-  const cmd = core.commandes(SCRIPT, projet);
+  const cmd = core.commandes(SCRIPT, projet, input.session_id);
   if (!texte || !texte.trim()) texte = rappelSession(input, s, projet, cmd);
   const livraisons = core.texteLivraisons({ agent: AGENT, sessionId: input.session_id, dernierMessage: input.last_assistant_message }); // ancre-mutation:stop-livraisons
   const motif = [texte, livraisons].filter(x => x && x.trim()).join('\n');
   if (!motif) return;
   let vue = '';
-  try { vue = core.contexteSession({ agent: AGENT, projet, script: SCRIPT }); } catch (_) { vue = ''; } // ancre-mutation:stop-vue
+  try { vue = core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id }); } catch (_) { vue = ''; } // ancre-mutation:stop-vue
   ecrire({ decision: 'block', reason: ajuster(motif, vue, '', cmd.lister) });
 }
 
@@ -762,9 +762,7 @@ function executerHook(brut) {
   } catch (_) { /* silence : ne jamais bloquer l'utilisateur */ }
 }
 
-module.exports = { analyser, gardeCodex, ajuster, litteraux, cheminsPatch, AGENT };
-
-if (require.main === module) {
+function main() {
   if (process.argv[2] === '--reconcilier-base') {
     // Base du réconciliateur (processus détaché, ou lancé une fois à la main avant l'activation).
     try { etablirBase(); process.stdout.write(`base du réconciliateur établie (${AGENT})\n`); } catch (e) {
@@ -793,3 +791,7 @@ if (require.main === module) {
     });
   }
 }
+
+module.exports = { analyser, gardeCodex, ajuster, litteraux, cheminsPatch, AGENT, main };
+
+if (require.main === module) main();

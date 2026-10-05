@@ -247,7 +247,7 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     const c = ctx(r);
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
     assert.match(c, new RegExp(`Nouveau message ${m}`));
-    assert.ok(c.includes(`node "${HOOK.replace(/\\/g, '/')}" ajouter --projet ${PROJET} --de ${m} "texte mot pour mot"`), 'commande ajouter exacte (chemin du script et projet)');
+    assert.ok(c.includes(`node "${HOOK.replace(/\\/g, '/')}" ajouter --projet ${PROJET} --session sess-a --de ${m} "texte mot pour mot"`), 'commande ajouter exacte (chemin du script et projet)');
     assert.match(c, /une seule source par problème/);
     assert.ok(!c.includes('\u2014'), 'tiret cadratin interdit');
   });
@@ -565,7 +565,7 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
   test('plafond : additionalContext <= 9000 avec 80 lignes longues, mention « lignes de plus », règle 6 bis gardée', async () => {
     const d = dossier('plafond');
     avecRacine(d, () => { // synchrone : aucun autre banc ne s'intercale pendant le changement de racine
-      for (let i = 0; i < 80; i++) core.ajouterLigne({ projet: PROJET, agent: 'codex', texte: `travail ${i} ` + 'x'.repeat(380), de: null });
+      for (let i = 0; i < 80; i++) core.ajouterLigne({ projet: PROJET, agent: 'codex', texte: `travail ${i} ` + 'x'.repeat(380), de: null, sessionId: 'sess-a' });
     });
     const r = await hook(d, payload('UserPromptSubmit', { prompt: 'où en est-on ?' }));
     const c = ctx(r);
@@ -707,7 +707,7 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     // Encore un tour sans les traiter : le rappel REVIENT.
     await tourTrie(d, parent, 't3', 'et le changelog');
     const s3 = await hook(d, payload('Stop', { turn_id: 't3', last_assistant_message: 'Changelog fait.', transcript_path: parent }));
-    assert.match(s3.json.reason, /n'est pas traité \(2\)/);
+    assert.equal(s3.out, '', 'livraisons inchangees : pas de nouvelle relance de fin de tour');
     // La première livraison est vérifiée et prouvée : elle sort du rappel.
     ecrirePreuve(d, 'infra.codex.md', [`- résultat de l'export vérifié et intégré [ctx ${c1}]`]);
     await hook(d, payload('PostToolUse', { transcript_path: parent }));
@@ -735,7 +735,7 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     const [c1] = Object.keys(e.lignes);
     assert.equal(e.lignes[c1].texte, '[agent] « sous-agent worker » (worker, th-9) : à sa fin, lire son résultat, le vérifier et l\'intégrer.');
     const e9 = rolloutEnfant(d, 'th-9', { chemin: '/root/nettoyage', surnom: 'Noether', role: 'worker' });
-    const fin = () => hook(d, payload('SubagentStop', { agent_id: 'th-9', agent_type: 'worker', agent_transcript_path: e9 }));
+    const fin = (tour = 'tour-1') => hook(d, payload('SubagentStop', { agent_id: 'th-9', agent_type: 'worker', agent_transcript_path: e9, last_assistant_message: tour }));
     await fin();
     assert.ok(etat(d).lignes[c1].note.endsWith(' : ' + e9), 'le rollout connu à la fin est donné comme résultat');
     await fin(); // autre tour du sous-agent alors que la ligne attend encore : une seule ligne par agent
@@ -743,7 +743,7 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     ecrirePreuve(d, 'infra.codex.md', [`- résultat intégré [ctx ${c1}]`]);
     await hook(d, payload('PostToolUse', { transcript_path: parent }));
     assert.equal(etat(d).lignes[c1].statut, 'fait');
-    await fin(); // le sous-agent, relancé, rend un nouveau résultat après la clôture
+    await fin('tour-2'); // nouvelle livraison identifiable apres la cloture
     e = etat(d);
     assert.equal(Object.keys(e.lignes).length, 2);
     const c2 = Object.keys(e.lignes).sort()[1];
@@ -877,7 +877,7 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     const parent = rolloutParent(d);
     await tourTrie(d, parent, 't1', 'travaille sur le lot B');
     await attendreBase(d);
-    const id = avecRacine(d, () => core.ajouterLigne({ projet: PROJET, agent: 'codex', texte: 'Relire le lot B', de: null }));
+    const id = avecRacine(d, () => core.ajouterLigne({ projet: PROJET, agent: 'codex', sessionId: 'sess-a', texte: 'Relire le lot B', de: null }));
     avecRacine(d, () => core.signalerAgent({ de: 'claude', vers: 'codex', projet: PROJET, ligne: id, genre: 'deja-fait', texte: 'lot B relu et intégré (historique du 2026-10-03)' }));
     const outil = () => hook(d, payload('PostToolUse', { transcript_path: parent }));
     const c = ctx(await outil());
@@ -1081,7 +1081,7 @@ const MUTATIONS = [
   { nom: 'secours', motif: 'incident disque', transformer: s => s.replace(/signalerEchec\(input, m, [^\n]*\/\/ ancre-mutation:secours/, '/* mutation */') },
   { nom: 'stop-session', motif: '^Stop Codex', transformer: s => s.replace(/if \(!cle \|\| !aTrier\.length \|\| \(s\.rappels \|\| \[\]\)\.includes\(cle\)\) return ''; \/\/ ancre-mutation:stop-session/, "return ''; // mutation") },
   { nom: 'cli-reessai', motif: '^CLI sous charge', transformer: s => s.replace(/while \(r\.code !== 0 && \/verrou occupé\/\.test\(r\.erreur \|\| ''\) && Date\.now\(\) < limite\) \{ \/\/ ancre-mutation:cli-reessai/, 'while (false) { // mutation') },
-  { nom: 'stop-vue', motif: '^Stop Codex', transformer: s => s.replace(/try \{ vue = core\.contexteSession\(\{ agent: AGENT, projet, script: SCRIPT \}\); \} catch \(_\) \{ vue = ''; \} \/\/ ancre-mutation:stop-vue/, "vue = ''; // mutation") },
+  { nom: 'stop-vue', motif: '^Stop Codex', transformer: s => s.replace(/try \{ vue = core\.contexteSession\(\{ agent: AGENT, projet, script: SCRIPT, sessionId: input\.session_id \}\); \} catch \(_\) \{ vue = ''; \} \/\/ ancre-mutation:stop-vue/, "vue = ''; // mutation") },
   { nom: 'suivi-lancement', motif: '^sous-agents', transformer: s => s.replace('return core.suivreTache({ // ancre-mutation:suivi-lancement', 'return null; core.suivreTache({ // mutation') },
   { nom: 'suivi-fin', motif: '^sous-agents', transformer: s => s.replace(/core\.finirTache\(\{[^\n]*\/\/ ancre-mutation:suivi-fin/, '// mutation') },
   { nom: 'stop-livraisons', motif: '^sous-agents', transformer: s => s.replace(/const livraisons = core\.texteLivraisons\([^\n]*\/\/ ancre-mutation:stop-livraisons/, "const livraisons = ''; // mutation") },

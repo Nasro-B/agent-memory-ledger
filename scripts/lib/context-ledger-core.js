@@ -180,7 +180,7 @@ const config = require('./config.js');
 
 const AGENTS = config.AGENTS;
 // Dossier de l'adaptateur (scripts/claude, scripts/codex) -> agent.
-const DOSSIERS_AGENTS = { claude: 'claude', codex: 'codex' };
+const DOSSIERS_AGENTS = { claude: 'claude', codex: 'codex', 'codex-home': 'codex-home', '.codex-home': 'codex-home' };
 const PLAFOND = 9000;
 const EXTRAIT_M = 300;
 const EXTRAIT_C = 400;
@@ -620,7 +620,7 @@ function rejouerJournal(projet, agent) {
       case 'ajout': {
         const de = v.de ? chaine(v.de).toUpperCase() : null;
         e.lignes[id] = {
-          texte: chaine(v.texte), de, date, ts, statut: 'ouvert', note: null, preuve: null, citationUtilisateur: null, maj: ts,
+          texte: chaine(v.texte), de, date, ts, statut: 'ouvert', note: null, preuve: null, citationUtilisateur: null, maj: ts, session: v.session || null,
         };
         const d = de && e.demandes[de];
         if (d) { d.statut = 'converti'; d.lignes = d.lignes.concat(id); d.maj = ts; }
@@ -630,10 +630,11 @@ function rejouerJournal(projet, agent) {
         if (l && STATUTS_MANUELS.includes(v.apres)) { l.statut = v.apres; if (v.note) l.note = v.note; l.maj = ts; }
         break;
       case 'fait':
-        if (l) Object.assign(l, { statut: 'fait', preuve: v.preuve || null, maj: ts });
+        if (l) Object.assign(l, { statut: 'fait', preuve: v.preuve || null, maj: ts, ...(v.cloture ? { cloture: v.cloture } : {}) });
         break;
       case 'partiel':
         if (l) {
+          if (v.cloture) l.cloture = v.cloture;
           const note = `partiel (preuve : ${v.preuve})`;
           l.statut = 'en-cours';
           l.note = l.note && !/^partiel \(preuve/.test(l.note) ? `${note} ; ${l.note}` : note;
@@ -927,7 +928,7 @@ function ajouterDemande({ projet, agent, texte, session, promptId }) {
   });
 }
 
-function ajouterLigne({ projet, agent, texte, de }) {
+function ajouterLigne({ projet, agent, texte, de, sessionId }) {
   const t = chaine(texte);
   if (!t.trim()) throw new Error('texte de la ligne vide');
   const deId = de ? normaliserId(de, 'M') : null;
@@ -940,7 +941,7 @@ function ajouterLigne({ projet, agent, texte, de }) {
     const iso = maintenantIso();
     etat.lignes[id] = {
       texte: t, de: deId, date: dateLocale(), ts: iso, statut: 'ouvert',
-      note: null, preuve: null, citationUtilisateur: null, maj: iso,
+      note: null, preuve: null, citationUtilisateur: null, maj: iso, session: sessionId || (deId && etat.demandes[deId].session) || null,
     };
     if (deId) {
       const d = etat.demandes[deId];
@@ -950,7 +951,7 @@ function ajouterLigne({ projet, agent, texte, de }) {
       d.maj = iso;
     }
     if (t.length > EXTRAIT_COMPACT) o.texteLong(id, t);
-    o.journal({ evt: 'ajout', id, de: deId, texte: t });
+    o.journal({ evt: 'ajout', id, de: deId, texte: t, session: etat.lignes[id].session });
     return id;
   });
 }
@@ -1112,8 +1113,8 @@ function secours({ agent, sessionId, promptId, texte, erreur }) {
   return f;
 }
 
-function contexteEchecMessage({ agent, projet, script, erreur, fichierSecours }) {
-  const cmd = commandes(script, projet);
+function contexteEchecMessage({ agent, projet, script, erreur, fichierSecours, sessionId }) {
+  const cmd = commandes(script, projet, sessionId);
   return composerContexte([
     `Fichier contexte (projet ${projet}, agent ${agent}) : ce message de l'utilisateur n'a PAS pu être enregistré (${chaine(erreur) || 'erreur inconnue'}).`,
     fichierSecours ? `Il est gardé mot pour mot dans ${fichierSecours}.` : '',
@@ -1126,7 +1127,7 @@ function rappelStop({ agent, sessionId, promptId, dernierMessage, script }) {
   if (!s || !s.projet) return null;
   const cle = s.promptCourant || promptId || s.tourDebut;
   if (!cle || (s.rappels || []).includes(cle)) return null;
-  const etat = lireLedger(s.projet, agent);
+  const etat = etatDeSession(lireLedger(s.projet, agent), agent, sessionId);
   const msg = chaine(dernierMessage);
   const aTrier = (s.tourMessages || []).filter(id => etat.demandes[id] && etat.demandes[id].statut === 'a-trier');
   const lignesTour = s.tourDebut ? trierIds(etat.lignes).filter(id => {
@@ -1141,7 +1142,7 @@ function rappelStop({ agent, sessionId, promptId, dernierMessage, script }) {
     return false;
   });
   if (deja) return null;
-  const cmd = commandes(script, s.projet);
+  const cmd = commandes(script, s.projet, sessionId);
   // Liste plafonnée : les consignes doivent rester lisibles sous le plafond de 9 000 caractères.
   const borner = items => (items.length > MAX_IDS_RAPPEL
     ? `${items.slice(0, MAX_IDS_RAPPEL).join(', ')} et ${items.length - MAX_IDS_RAPPEL} autre(s) (liste complète : \`${cmd.lister}\`)`
@@ -1235,7 +1236,7 @@ function suiteTranscript({ agent, sessionId, fichier, surLigne }) {
 // Mesuré dans une session réelle : 443 fins de sous-agents, dont 301 arrivées PENDANT que l'orchestrateur
 // faisait autre chose ; pour 248, il n'a plus jamais reparlé de l'agent ensuite. Une notification passe une
 // fois, rien ne la retient. Ici chaque sous-agent lancé devient une ligne de la liste de travail : créée au
-// lancement, marquée « terminé, résultat à traiter » à la fin, rappelée à chaque fin de tour, et retirée
+// lancement, marquée « terminé, résultat à traiter » à la fin, rappelée une fois par état au Stop, et retirée
 // seulement sur preuve [ctx C-NNNN] (résultat vérifié et intégré).
 // Les tâches suivies sont gardées dans la session de l'orchestrateur :
 //   session.taches[idTache] = { ligne, projet, titre, genre, resultat, alias, lance, fini, statut, clos }
@@ -1259,7 +1260,12 @@ function reessayer(fn) {
 // Au lancement : une ligne de travail par tâche de fond. tache = { id, genre, titre, resultat, alias }
 // (alias : autre nom sous lequel la fin de la tâche peut être annoncée). Retourne l'ID de la ligne, ou null
 // si la tâche est déjà suivie.
-function suivreTache({ agent, sessionId, cwd, tache }) {
+function suivreTache(args) {
+  if (!args.sessionId || !chaine(args.tache && args.tache.id)) return null;
+  return avecVerrou(cheminSession(args.agent, args.sessionId) + '.tache-' + hashCourt(chaine(args.tache.id)), () => suivreTacheSousVerrou(args));
+}
+
+function suivreTacheSousVerrou({ agent, sessionId, cwd, tache }) {
   validerAgent(agent);
   const id = chaine(tache && tache.id);
   if (!sessionId || !id) return null;
@@ -1276,7 +1282,7 @@ function suivreTache({ agent, sessionId, cwd, tache }) {
   const titre = (chaine(tache.titre) || 'sans titre').replace(/\s+/g, ' ').slice(0, 90);
   const genre = chaine(tache.genre) || 'agent';
   const texte = `[agent] « ${titre} » (${genre}, ${id}) : à sa fin, lire son résultat, le vérifier et l'intégrer.`;
-  const ligne = reessayer(() => ajouterLigne({ projet, agent, texte, de: null })); // ancre-mutation:livraison-lancement
+  const ligne = reessayer(() => ajouterLigne({ projet, agent, texte, de: null, sessionId })); // ancre-mutation:livraison-lancement
   try { reessayer(() => changerEtat({ projet, agent, id: ligne, statut: 'en-cours', note: `agent en cours depuis ${dateLocale()}` })); } catch (_) { /* la ligne existe : seul l'état manque */ }
   // Fiche du sous-agent (mission mot pour mot quand elle est connue). Un échec ne retire rien au suivi :
   // la fiche sera créée au premier événement du sous-agent.
@@ -1296,23 +1302,46 @@ function suivreTache({ agent, sessionId, cwd, tache }) {
 //    été relancé et a rendu un nouveau résultat) : une nouvelle ligne ; un filet qui relit une trace
 //    (transcript) passe reprise = false, car il peut revoir la fin déjà traitée ;
 //  - tâche inconnue (lancée avant l'activation, ou par un sous-agent) : ignorée.
-function finirTache({ agent, sessionId, id, statut, resultat, reprise }) {
+function identiteLivraison({ livraisonId, resultat, dernierMessage }) {
+  // Un rapport different peut etre remis dans le meme tour du parent.
+  // Sans ID ni texte final, le chemin seul est conservateur : sa date ne prouve pas une nouvelle fin.
+  return hashCourt(JSON.stringify([chaine(livraisonId), chaine(resultat), chaine(dernierMessage)]));
+}
+
+function finirTache(args) {
+  if (!args.sessionId || !chaine(args.id)) return null;
+  return avecVerrou(cheminSession(args.agent, args.sessionId) + '.tache-' + hashCourt(chaine(args.id)), () => finirTacheSousVerrou(args));
+}
+
+function finirTacheSousVerrou({ agent, sessionId, id, statut, resultat, reprise, livraisonId, dernierMessage }) {
   validerAgent(agent);
   const cle = chaine(id);
   const s = lireSession(agent, sessionId);
   const t = s && estObjet(s.taches) && s.taches[cle];
   if (!t) return null;
+  if (t.fini && !reprise) return null; // relecture d'une trace, jamais une nouvelle livraison
   const st = chaine(statut) || 'terminé';
   const res = chaine(resultat) || chaine(t.resultat);
+  const identite = identiteLivraison({ livraisonId, resultat: res, dernierMessage });
+  if ((t.livraisonsVues || []).includes(identite)) return null;
+  // Migration prudente : une fin deja connue sans identite ne rouvre pas sa ligne.
+  if (t.fini && !t.livraisonId) {
+    modifierSession(agent, sessionId, x => {
+      const y = x.taches && x.taches[cle];
+      if (y) { y.livraisonId = identite; y.livraisonsVues = [identite]; }
+    });
+    return null;
+  }
   const note = `TERMINÉ (${st}) le ${dateLocale()} : résultat à lire, vérifier et intégrer${res ? ' : ' + res : ''}`; // ancre-mutation:livraison-fin
   let close = false;
   try { const l = lireLedger(t.projet, agent).lignes[t.ligne]; close = !l || TERMINAUX.includes(l.statut); } catch (_) { return null; }
   const marquer = ligne => reessayer(() => modifierSession(agent, sessionId, x => {
     const y = estObjet(x.taches) && x.taches[cle];
-    if (y) Object.assign(y, { ligne, fini: maintenantIso(), statut: st, resultat: res, clos: null, annonce: null });
+    if (y) Object.assign(y, { ligne, fini: maintenantIso(), statut: st, resultat: res, clos: null, annonce: null,
+      livraisonId: identite, livraisonsVues: [...new Set([...(y.livraisonsVues || []), identite])].slice(-100) });
   }));
   if (!close) {
-    if (t.fini) return null;
+    // Une nouvelle version encore en attente actualise la meme ligne.
     try { reessayer(() => changerEtat({ projet: t.projet, agent, id: t.ligne, statut: 'ouvert', note })); } catch (_) { /* close entre-temps : rien à rappeler */ }
     marquer(t.ligne);
     return Object.assign({}, t, { id: cle, statut: st, resultat: res });
@@ -1322,7 +1351,7 @@ function finirTache({ agent, sessionId, id, statut, resultat, reprise }) {
     return null;
   }
   const texte = `[agent] « ${t.titre} » (${t.genre}, ${cle}) : nouveau résultat rendu après la clôture de ${t.ligne}, à lire, vérifier et intégrer.`;
-  const ligne = reessayer(() => ajouterLigne({ projet: t.projet, agent, texte, de: null })); // ancre-mutation:livraison-reprise
+  const ligne = reessayer(() => ajouterLigne({ projet: t.projet, agent, texte, de: null, sessionId })); // ancre-mutation:livraison-reprise
   try { reessayer(() => changerEtat({ projet: t.projet, agent, id: ligne, statut: 'ouvert', note })); } catch (_) { /* la ligne existe : seule la note manque */ }
   marquer(ligne);
   return Object.assign({}, t, { id: cle, ligne, statut: st, resultat: res });
@@ -1377,7 +1406,7 @@ function decrireTache(t) {
 }
 
 // Rappel de fin de tour : livraisons non traitées et non citées dans la réponse de l'orchestrateur.
-// Revient à CHAQUE fin de tour tant que le résultat n'est pas prouvé traité.
+// Un état inchangé ne bloque pas chaque tour. Le résultat reste conservé jusqu'à sa preuve de traitement.
 function texteLivraisons({ agent, sessionId, dernierMessage }) {
   let etat;
   try { etat = livraisons({ agent, sessionId }); } catch (_) { return ''; }
@@ -1385,6 +1414,13 @@ function texteLivraisons({ agent, sessionId, dernierMessage }) {
   const attente = etat.attente.filter(t => !msg.includes(t.ligne)); // ancre-mutation:livraison-rappel-fin-de-tour
   const nonDites = etat.attente.filter(t => !t.annonce);
   if (!attente.length) { noterAnnonce(agent, sessionId, nonDites, false); return ''; } // citées : déjà connues
+  const empreinte = hashCourt(JSON.stringify(etat.attente.map(t => [t.ligne, t.livraisonId || t.fini]).sort()));
+  const deja = modifierSession(agent, sessionId, s => {
+    if (s.rappelLivraisonsStop === empreinte) return true;
+    s.rappelLivraisonsStop = empreinte;
+    return false;
+  });
+  if (deja) return '';
   noterAnnonce(agent, sessionId, nonDites, true);
   const liste = attente.slice(0, MAX_LIVRAISONS).map(decrireTache).join(' ; ');
   const plus = attente.length > MAX_LIVRAISONS ? ` ; et ${attente.length - MAX_LIVRAISONS} autre(s)` : '';
@@ -1569,20 +1605,21 @@ function texteSignalementsAgents({ agent, sessionId, session }) {
   try { taille = fs.statSync(lp(cheminBoite(agent))).size; } catch (_) { return ''; }
   const lireVus = () => { try { const o = JSON.parse(sansBom(lireTexte(cheminVusBoite(agent)) || '{}')); return estObjet(o) ? o : {}; } catch (_) { return {}; } };
   const vus = lireVus();
-  const depuis = Number.isFinite(vus[projet]) && vus[projet] <= taille ? vus[projet] : 0;
+  const cleVue = `${projet}:${sessionId || '*'}`;
+  const depuis = Number.isFinite(vus[cleVue]) && vus[cleVue] <= taille ? vus[cleVue] : 0;
   if (depuis >= taille) return '';
   const { fin, signalements } = lireBoite(agent, depuis);
-  const nouveaux = signalements.filter(x => x.projet === projet);
+  const etat = etatDeSession(lireLedger(projet, agent), agent, sessionId);
+  const nouveaux = signalements.filter(x => x.projet === projet && etat.lignes[x.ligne] && !TERMINAUX.includes(etat.lignes[x.ligne].statut));
   try {
     reessayer(() => avecVerrou(cheminVusBoite(agent), () => {
       const cour = lireVus();
-      if (Number.isFinite(cour[projet]) && cour[projet] >= fin) return;
-      cour[projet] = fin;
+      if (Number.isFinite(cour[cleVue]) && cour[cleVue] >= fin) return;
+      cour[cleVue] = fin;
       ecrireAtomique(cheminVusBoite(agent), JSON.stringify(cour) + '\n');
     }));
   } catch (_) { /* redit au prochain événement : mieux qu'un signalement jamais dit */ }
   if (!nouveaux.length) return '';
-  const etat = lireLedger(projet, agent);
   const textes = nouveaux.map(x => {
     const l = etat.lignes[x.ligne];
     const consigne = CONSIGNES_SIGNALEMENT_AGENT[x.genre] ? CONSIGNES_SIGNALEMENT_AGENT[x.genre](x.ligne) : '';
@@ -1593,10 +1630,10 @@ function texteSignalementsAgents({ agent, sessionId, session }) {
 }
 
 // Signalements dont la ligne est encore ouverte : rappelés avec la liste (démarrage, reprise, compactage).
-function texteSignalementsEnAttente({ agent, projet }) {
+function texteSignalementsEnAttente({ agent, projet, sessionId }) {
   const { signalements } = lireBoite(agent, 0);
   if (!signalements.length) return '';
-  const etat = lireLedger(projet, agent);
+  const etat = etatDeSession(lireLedger(projet, agent), agent, sessionId);
   const ouverts = signalements.filter(x => x.projet === projet && etat.lignes[x.ligne] && !TERMINAUX.includes(etat.lignes[x.ligne].statut));
   if (!ouverts.length) return '';
   const plus = ouverts.length > MAX_SIGNALEMENTS_LISTE ? ` ; et ${ouverts.length - MAX_SIGNALEMENTS_LISTE} plus ancien(s) dans ${cheminBoite(agent)}` : '';
@@ -1936,13 +1973,31 @@ function compactageDuSousAgent({ agent, id, fichier, motifs, annonce }) {
 // ---------------------------------------------------------------------------
 // Preuves
 
+function texteHorsExemples(texte) {
+  let bloc = null;
+  return chaine(texte).split(/\r?\n/).map(l => {
+    const fence = /^\s*(`{3,}|~{3,})/.exec(l);
+    if (fence) {
+      if (!bloc) bloc = { car: fence[1][0], taille: fence[1].length };
+      else if (fence[1][0] === bloc.car && fence[1].length >= bloc.taille && !l.slice(fence[0].length).trim()) bloc = null;
+      return '';
+    }
+    if (bloc || /^\s*>/.test(l) || /\bexemple\s*:/i.test(l)) return '';
+    return l;
+  }).join('\n');
+}
+
 function extraireMarqueurs(texte) {
   const out = [];
-  const t = chaine(texte);
+  const t = texteHorsExemples(texte);
   RE_MARQUEUR.lastIndex = 0;
   let m;
   while ((m = RE_MARQUEUR.exec(t))) {
     const partiel = !!m[2];
+    const debut = t.lastIndexOf('\n', m.index) + 1;
+    const fin = t.indexOf('\n', m.index);
+    const ligne = t.slice(debut, fin < 0 ? t.length : fin);
+    if (!partiel && /\b(?:non[ -](?:termin[eé]|v[eé]rifi[eé]|trait[eé]|fait)s?|pas (?:fait|fini|termin[eé])|en[ -]cours|[aà] (?:faire|v[eé]rifier|traiter))\b/i.test(ligne)) continue;
     for (const id of m[1].match(/C-\d{4,}/gi)) out.push({ id: id.toUpperCase(), partiel });
   }
   return out;
@@ -2114,7 +2169,7 @@ function reconcilier({ agent, base }) {
     const premierPassage = !st;
     const s = st || { fichiers: {} };
     s.fichiers = s.fichiers || {};
-    const trouves = [];
+    s.attente = Array.isArray(s.attente) ? s.attente : [];
     for (const f of listerFichiersPreuve(b)) {
       let stat;
       try { stat = fs.statSync(lp(f)); } catch (_) { continue; }
@@ -2123,26 +2178,55 @@ function reconcilier({ agent, base }) {
       if (prec && prec.mtimeMs === stat.mtimeMs && prec.taille === stat.size) continue;
       const texte = lireTexte(f);
       if (texte === null) continue;
-      const lignes = texte.split(/\r?\n/).filter(l => /\[ctx\s/i.test(l));
+      const lignes = texteHorsExemples(texte).split(/\r?\n/).filter(l => /\[ctx\s/i.test(l));
       const hashes = lignes.map(hashCourt);
       if (!premierPassage) {
         const anciens = new Set(prec ? prec.hashes : []);
         const marqueurs = [];
         lignes.forEach((l, i) => { if (!anciens.has(hashes[i])) marqueurs.push(...extraireMarqueurs(l)); });
-        if (marqueurs.length) trouves.push({ fichier: f, marqueurs });
+        if (marqueurs.length) {
+          const clePreuve = hashCourt(JSON.stringify([cle, hashes, marqueurs]));
+          if (!s.attente.some(p => p.cle === clePreuve)) s.attente.push({ cle: clePreuve, fichier: f, marqueurs });
+        }
       }
       s.fichiers[cle] = { mtimeMs: stat.mtimeMs, taille: stat.size, hashes: [...new Set(hashes)] };
     }
     s.maj = maintenantIso();
     ecrireAtomique(fEtat, JSON.stringify(s) + '\n');
-    return trouves;
+    // Le curseur et la file sont ecrits ensemble AVANT l'application.
+    // Une interruption conserve donc les preuves a rejouer.
+    return s.attente.slice();
   });
   const total = { faits: [], partiels: [], ignores: [], projets: [] };
-  for (const { fichier, marqueurs } of parFichier) {
+  for (const { cle, fichier, marqueurs } of parFichier) {
     const r = appliquerPreuves({ agent, marqueurs, preuve: `fichier ${fichier}` });
     for (const k of Object.keys(total)) total[k].push(...r[k].filter(x => !total[k].includes(x)));
+    avecVerrou(fEtat, () => {
+      const s = JSON.parse(sansBom(lireTexte(fEtat)));
+      s.attente = (s.attente || []).filter(p => p.cle !== cle);
+      ecrireAtomique(fEtat, JSON.stringify(s) + '\n');
+    });
   }
   return total;
+}
+
+// Initialisation hors du budget du hook ; ensuite seuls les fichiers modifies sont relus.
+function reconcilierDansHook({ agent, base }) {
+  const f = path.join(racine(), `.reconciliation-${agent}.json`);
+  if (fs.existsSync(lp(f))) return reconcilier({ agent, base });
+  const marqueur = f + '.base-en-cours';
+  fs.mkdirSync(lp(path.dirname(f)), { recursive: true });
+  try { fs.closeSync(fs.openSync(lp(marqueur), 'wx')); } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    if (Date.now() - fs.statSync(lp(marqueur)).mtimeMs < 120000) return { faits: [], partiels: [], ignores: [], projets: [] };
+    fs.unlinkSync(lp(marqueur));
+    try { fs.closeSync(fs.openSync(lp(marqueur), 'wx')); } catch (_) { return { faits: [], partiels: [], ignores: [], projets: [] }; }
+  }
+  const code = `try { require(${JSON.stringify(__filename)}).reconcilier(${JSON.stringify({ agent, base })}); } finally { try { require('fs').unlinkSync(${JSON.stringify(marqueur)}); } catch (_) {} }`;
+  const enfant = require('child_process').spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
+  enfant.on('error', () => { try { fs.unlinkSync(lp(marqueur)); } catch (_) { /* prochain evenement */ } });
+  enfant.unref();
+  return { faits: [], partiels: [], ignores: [], projets: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -2406,14 +2490,16 @@ function gardeOutil({ input, generique }) {
 // ---------------------------------------------------------------------------
 // Texte injecté au modèle
 
-function commandes(script, projet) {
+function commandes(script, projet, sessionId) {
   const s = `node "${chaine(script).replace(/\\/g, '/')}"`;
   return {
-    ajouter: m => `${s} ajouter --projet ${projet}${m ? ` --de ${m}` : ''} "texte mot pour mot"`,
+    ajouter: m => `${s} ajouter --projet ${projet}${sessionId ? ` --session ${sessionId}` : ''}${m ? ` --de ${m}` : ''} "texte mot pour mot"`,
+    reprendre: `${s} reprendre --projet ${projet} --session ${sessionId || 'ID'} C-NNNN`,
+    traiter: `${s} traiter --projet ${projet} --session ${sessionId || 'ID'} C-NNNN --preuve "rapport.md" --executant ID --verification "controle effectue" --resultat accepte`,
     sansTravail: m => `${s} sans-travail --projet ${projet} ${m} "raison courte"`,
     etat: `${s} etat --projet ${projet} C-NNNN en-cours|bloque-utilisateur|ouvert "note"`,
     abandon: `${s} abandon --projet ${projet} C-NNNN "citation EXACTE de l'utilisateur"`,
-    lister: `${s} lister --projet ${projet}`,
+    lister: `${s} lister --projet ${projet}${sessionId ? ` --session ${sessionId}` : ''}`,
   };
 }
 
@@ -2448,28 +2534,52 @@ function composerContexte(entete, lignes, pied, commandeLister, max = PLAFOND) {
   return texte;
 }
 
-function contexteMessage({ agent, projet, idMessage, script }) {
-  const cmd = commandes(script, projet);
-  const etat = lireLedger(projet, agent);
+function etatDeSession(etat, agent, sessionId) {
+  if (!sessionId) return etat; // API historique : la vue complete reste accessible.
+  const s = lireSession(agent, sessionId) || {};
+  const taches = Object.values(s.taches || {}).filter(t => t.projet === etat.projet).map(t => t.ligne);
+  const reprises = s.reprises && s.reprises[etat.projet] || [];
+  const demandes = Object.fromEntries(Object.entries(etat.demandes).filter(([, d]) => d.session === sessionId));
+  const lignes = Object.fromEntries(Object.entries(etat.lignes).filter(([id, l]) =>
+    l.session === sessionId || (l.de && demandes[l.de]) || taches.includes(id) || reprises.includes(id)));
+  return { ...etat, demandes, lignes };
+}
+
+function reprendreLignes({ agent, projet, sessionId, ids }) {
+  if (!sessionId) throw new Error('--session requis');
+  const e = lireLedger(projet, agent);
+  for (const id of ids) if (!e.lignes[id]) throw new Error(`${id} introuvable`);
+  modifierSession(agent, sessionId, s => {
+    s.reprises = s.reprises || {};
+    s.reprises[projet] = [...new Set([...(s.reprises[projet] || []), ...ids])];
+  });
+}
+
+function contexteMessage({ agent, projet, idMessage, script, sessionId }) {
+  const cmd = commandes(script, projet, sessionId);
+  const etat = etatDeSession(lireLedger(projet, agent), agent, sessionId);
   const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\n${POUR_ORCHESTRATEUR}`; // ancre-mutation:pour-orchestrateur
   const pied = `Nouveau message ${idMessage}. Avant d'agir : transforme-le en ligne(s) de travail avec \`${cmd.ajouter(idMessage)}\` ou classe-le avec \`${cmd.sansTravail(idMessage)}\`. Citer \`[ctx C-NNNN]\` dans l'historique ou le commit quand c'est fait ; \`[ctx C-NNNN partiel]\` si ce n'est pas fini.`;
   return composerContexte(entete, lignesCompactes(etat), pied, cmd.lister);
 }
 
-function contexteSession({ agent, projet, script }) {
-  const cmd = commandes(script, projet);
-  const etat = lireLedger(projet, agent);
+function contexteSession({ agent, projet, script, sessionId }) {
+  const cmd = commandes(script, projet, sessionId);
+  const complet = lireLedger(projet, agent);
+  const etat = etatDeSession(complet, agent, sessionId);
   const alerte = avertissementSecours();
   let attente = '';
-  try { attente = texteSignalementsEnAttente({ agent, projet }); } catch (_) { attente = ''; } // ancre-mutation:signalements-attente
+  try { attente = texteSignalementsEnAttente({ agent, projet, sessionId }); } catch (_) { attente = ''; } // ancre-mutation:signalements-attente
   const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\nCe fichier fait foi pour ce qui reste, pas le résumé de compactage.\n${POUR_ORCHESTRATEUR}${alerte ? '\n' + alerte : ''}${attente ? '\n' + attente : ''}`;
-  const pied = `Commandes : \`${cmd.ajouter()}\` ; \`${cmd.etat}\` ; \`${cmd.lister}\`. Une ligne ne disparaît que sur preuve [ctx C-NNNN] (historique, mémoire ou commit).`;
+  const autres = sessionId ? Object.keys(complet.lignes).filter(id => !etat.lignes[id] && !TERMINAUX.includes(complet.lignes[id].statut)).length : 0;
+  const scope = sessionId ? `\nPerimetre : cette conversation. ${autres} ligne(s) d'autres missions conservees sur disque, sans ordre de les executer. Pour reprendre une mission : \`${cmd.reprendre}\`. Pour un livrable examine et prouve : \`${cmd.traiter}\`.` : '';
+  const pied = `Commandes : \`${cmd.ajouter()}\` ; \`${cmd.etat}\` ; \`${cmd.lister}\`. Une ligne ne disparaît que sur preuve [ctx C-NNNN] (historique, mémoire ou commit).${scope}`;
   return composerContexte(entete, lignesCompactes(etat), pied, cmd.lister);
 }
 
-function contexteApresPreuve({ agent, projet, script, resultat, preuve }) {
-  const cmd = commandes(script, projet);
-  const etat = lireLedger(projet, agent);
+function contexteApresPreuve({ agent, projet, script, resultat, preuve, sessionId }) {
+  const cmd = commandes(script, projet, sessionId);
+  const etat = etatDeSession(lireLedger(projet, agent), agent, sessionId);
   const faits = resultat.faits.length ? `Retiré sur preuve (${preuve}) : ${resultat.faits.join(', ')}.` : '';
   const partiels = resultat.partiels.length ? `Passé en-cours (partiel, ${preuve}) : ${resultat.partiels.join(', ')}.` : '';
   const entete = [`Fichier contexte (projet ${projet}, agent ${agent}) mis à jour.`, POUR_ORCHESTRATEUR, faits, partiels, 'Reste :'].filter(Boolean).join('\n');
@@ -2479,8 +2589,54 @@ function contexteApresPreuve({ agent, projet, script, resultat, preuve }) {
 // ---------------------------------------------------------------------------
 // CLI
 
+// Recu explicite pour un livrable hors historique.
+// Le hook conserve une declaration verifiable, il ne rejoue pas le travail de l'agent.
+function traiterLigne({ agent, projet, id, sessionId, executant, fichier, verification, resultat, reste }) {
+  if (!sessionId || !chaine(executant).trim() || !chaine(verification).trim()) throw new Error('--session, --executant et --verification requis');
+  if (!['accepte', 'rejete', 'partiel'].includes(resultat)) throw new Error('--resultat accepte|rejete|partiel requis');
+  if (!fichier) throw new Error('--preuve requis');
+  const chemin = path.resolve(fichier);
+  const stat = fs.statSync(lp(chemin));
+  if (!stat.isFile() || stat.size > 10 * 1024 * 1024) throw new Error('preuve attendue : fichier texte de 10 Mio au plus');
+  const contenu = fs.readFileSync(lp(chemin));
+  if (contenu.includes(0)) throw new Error('preuve binaire refusee');
+  const texte = sansBom(contenu.toString('utf8'));
+  const attendu = resultat === 'partiel' ? 'partiel' : 'traite';
+  const lignes = texteHorsExemples(texte).split(/\r?\n/);
+  const conforme = lignes.some(l => new RegExp(`\\bstatut\\s*:\\s*${attendu}\\b`, 'i').test(l)
+    && extraireMarqueurs(l).some(m => m.id === id && m.partiel === (resultat === 'partiel')));
+  if (!conforme) throw new Error(`preuve sans statut: ${attendu} et marqueur exact pour ${id}`);
+  const e = lireLedger(projet, agent);
+  const cible = e.lignes[id];
+  if (!cible) throw new Error(`${id} introuvable`);
+  if (!etatDeSession(e, agent, sessionId).lignes[id]) throw new Error('ligne hors de cette session : reprendre explicitement la mission avant de la traiter');
+  if (resultat === 'rejete' && (!/^\[agent\]/.test(cible.texte) || !reste || reste === id || !e.lignes[reste] || TERMINAUX.includes(e.lignes[reste].statut))) {
+    throw new Error('rejet : livraison [agent] et --reste pointant un travail encore ouvert requis');
+  }
+  const cloture = { version: 1, resultat, executant: chaine(executant), verificateur: `${agent}:${sessionId}`,
+    verification: chaine(verification), fichier: chemin, empreinte: crypto.createHash('sha256').update(contenu).digest('hex'),
+    date: maintenantIso(), reste: reste || null };
+  return modifierLedger(projet, agent, (etat, o) => {
+    const l = etat.lignes[id];
+    if (resultat === 'rejete' && (!etat.lignes[reste] || TERMINAUX.includes(etat.lignes[reste].statut))) throw new Error('le reste doit encore etre ouvert');
+    if (TERMINAUX.includes(l.statut) && l.statut !== 'fait') throw new Error('ligne abandonnee');
+    if (l.statut === 'fait' && resultat === 'partiel') throw new Error('une ligne cloturee ne peut pas redevenir partielle');
+    if (l.cloture && l.cloture.resultat !== 'partiel') return l.cloture;
+    const avant = l.statut;
+    l.statut = resultat === 'partiel' ? 'en-cours' : 'fait';
+    l.preuve = `fichier ${chemin} (sha256 ${cloture.empreinte})`;
+    l.cloture = cloture;
+    l.maj = cloture.date;
+    if (resultat === 'partiel') l.note = `partiel (preuve : ${l.preuve})`;
+    o.journal({ evt: resultat === 'partiel' ? 'partiel' : 'fait', id, avant, preuve: l.preuve, cloture });
+    return cloture;
+  });
+}
+
 const USAGE = [
   'Usage : node context-ledger.js <commande> --projet <projet> [args]',
+  '  traiter --projet P --session ID C-NNNN --preuve fichier --executant ID --verification "controle effectue" --resultat accepte|rejete|partiel [--reste C-NNNN]',
+  '  reprendre --projet P --session ID C-NNNN [C-NNNN...]',
   '  ajouter --projet P [--de M-NNNN] "texte mot pour mot"',
   '  sans-travail --projet P M-NNNN "raison courte"',
   '  etat --projet P C-NNNN en-cours|bloque-utilisateur|ouvert ["note"]',
@@ -2496,7 +2652,7 @@ const USAGE = [
   '       prévient l\'agent A qu\'une ligne de SA liste est déjà faite, le bloque ou pose question ; A la vérifie',
   '       et ne la ferme que sur sa propre preuve',
   '  (--fichier <chemin> : lit le texte libre dans un fichier UTF-8)',
-  'Aucune commande ne marque « fait » : seule une preuve [ctx C-NNNN] le fait.',
+  'etat ne marque jamais « fait ». traiter exige un fichier de preuve et conserve le recu de verification.',
   'Sous-agents : lister, chercher, fiche et help en lecture ; note sur leur propre fiche ; rien d\'autre.',
 ].join('\n');
 
@@ -2560,7 +2716,7 @@ function analyserArgs(argv) {
   const pos = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const m = /^--(projet|de|fichier|agent|fiche|genre)(?:=(.*))?$/.exec(a);
+    const m = /^--(projet|de|fichier|agent|fiche|genre|session|executant|preuve|verification|resultat|reste)(?:=(.*))?$/.exec(a);
     if (m) opts[m[1]] = m[2] !== undefined ? m[2] : argv[++i];
     else pos.push(a);
   }
@@ -2582,9 +2738,22 @@ function executerCli(argv, { agent, script }) {
     const texteLibre = debut => (opts.fichier ? sansBom(lireTexte(path.resolve(opts.fichier)) || '') : pos.slice(debut).join(' '));
     if (opts.projet !== undefined) validerProjet(opts.projet);
     switch (commande) {
+      case 'traiter': {
+        if (!opts.projet) throw new Error('--projet requis');
+        const id = normaliserId(pos[0], 'C');
+        const r = traiterLigne({ agent, projet: opts.projet, id, sessionId: opts.session, executant: opts.executant,
+          fichier: opts.preuve, verification: opts.verification, resultat: opts.resultat, reste: opts.reste ? normaliserId(opts.reste, 'C') : null });
+        return ok(`${id} : ${r.resultat}, verifie par ${r.verificateur}, preuve sha256 ${r.empreinte}.`);
+      }
+      case 'reprendre': {
+        if (!opts.projet || !pos.length) throw new Error('--projet et identifiants requis');
+        const ids = pos.map(id => normaliserId(id, 'C'));
+        reprendreLignes({ agent, projet: opts.projet, sessionId: opts.session, ids });
+        return ok(`Mission reprise pour la session ${opts.session} : ${ids.join(', ')}.`);
+      }
       case 'ajouter': {
         if (!opts.projet) throw new Error('--projet requis');
-        const id = ajouterLigne({ projet: opts.projet, agent, texte: texteLibre(0), de: opts.de || null });
+        const id = ajouterLigne({ projet: opts.projet, agent, texte: texteLibre(0), de: opts.de || null, sessionId: opts.session });
         return ok(`${id} ajouté (projet ${opts.projet}${opts.de ? `, de ${opts.de.toUpperCase()}` : ''}). Quand c'est fait : cite [ctx ${id}] dans l'historique ou le commit ; [ctx ${id} partiel] si ce n'est pas fini.`);
       }
       case 'sans-travail': {
@@ -2606,7 +2775,7 @@ function executerCli(argv, { agent, script }) {
         assurerVues(agent);
         const projets = opts.projet ? [opts.projet] : listerProjets(agent);
         if (!projets.length) return ok(`Aucun fichier contexte pour l'agent ${agent}.`);
-        return ok(projets.map(p => rendreVue(lireLedger(p, agent))).join('\n'));
+        return ok(projets.map(p => rendreVue(etatDeSession(lireLedger(p, agent), agent, opts.session))).join('\n'));
       }
       case 'chercher': {
         // Lecture seule, y compris dans la liste d'un autre agent (--agent) : rien n'est écrit.
@@ -2713,7 +2882,7 @@ module.exports = {
   texteConsigneSousAgent, consigneADonner, consigneDansTranscript, texteRepriseSousAgent, texteLectureSeule, compactageDuSousAgent, noterCompactage,
   transcriptDUnSousAgent, idDepuisTranscript,
   extraireMarqueurs, marqueursAjoutes, estFichierPreuve, preuveCommit, preuvesDepuisOutil,
-  appliquerPreuves, reconcilier,
+  appliquerPreuves, reconcilier, reconcilierDansHook,
   gardeOutil, texteToucheRacine, commandeViseRacine, appelleCli, commandeLectureOuCli,
   commandes, contexteMessage, contexteSession, contexteApresPreuve, composerContexte,
   executerCli,

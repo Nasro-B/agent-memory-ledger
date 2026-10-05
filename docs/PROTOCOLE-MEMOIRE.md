@@ -14,13 +14,15 @@ La maison est le dossier `~/.agent-memory-ledger` (ou celui de la variable `AGEN
 | Résumé commun | `Memory-Auto.md` | une ligne par événement, sous `### <projet>` | tous les agents, chacun ses lignes |
 | Règles du projet | `history/<projet>.rules.md` | réflexes à appliquer en priorité | l'utilisateur ou l'agent, à la main |
 
-`<agent>` vaut `claude` ou `codex`. Le projet d'un dossier vient de la table `projets.json` de la maison, sinon du nom du dépôt git, sinon il n'y en a pas (voir `scripts/lib/config.js`).
+`<agent>` vaut `claude`, `codex` ou `codex-home`. Le projet d'un dossier vient de la table `projets.json` de la maison, sinon du nom du dépôt git, sinon il n'y en a pas (voir `scripts/lib/config.js`). Les homes Codex gardent des signatures distinctes.
 
 ## 2. Au début d'une session
 
 Les hooks injectent, sous un plafond de 9 000 caractères : la liste de travail du projet, l'alerte « session précédente non documentée », les règles du projet, les dernières lignes du résumé commun, le journal récent de chaque agent. Ce qui ne tient pas est nommé avec son chemin : le lire au besoin.
 
 Après un compactage, ou à une reprise, c'est la liste de travail qui dit ce qui reste, pas le résumé de la conversation.
+
+Les rappels portent sur la conversation courante. Pour reprendre un travail d'une autre conversation : `reprendre --projet P --session ID C-NNNN`, puis `lister --projet P --session ID`. Sans `--session`, la commande `lister` conserve l'accès à la vue globale pour diagnostic.
 
 ## 3. Pendant le travail
 
@@ -53,6 +55,7 @@ Format, identique pour tous :
 - Type : `feat`, `fix`, `refactor`, `tests`, `config`, `docs`, `deploy`, ou le type du commit.
 - Les entrées récentes vont en haut du journal, juste après la ligne `---`.
 - Citer `[ctx C-NNNN]` retire la ligne de la liste de travail ; `[ctx C-NNNN partiel]` la laisse en cours. Aucune commande ne marque « fait » sans cette preuve écrite.
+- Pour un livrable examiné, `traiter` valide un reçu contenant le fichier de preuve, son SHA-256, l'exécutant, le vérificateur, le résultat et les restes. Les statuts et les identifiants sont détaillés dans [CLOTURE-ET-REPRISE.md](CLOTURE-ET-REPRISE.md). Les journaux d'appels d'outils sont des indices, jamais une preuve automatique d'achèvement.
 
 ## 5. Règles d'or
 
@@ -75,7 +78,7 @@ Format, identique pour tous :
 | Après un outil | `context-ledger.js` | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et rappelle les résultats qui attendent ; rend sa fiche à un sous-agent dont le contexte vient d'être compacté |
 | Après un commit | `memoire/commit.js` | entrée signée dans le journal et le résumé |
 | Après une écriture de fichier | `memoire/marqueur.js` | compte le travail non documenté |
-| Fin de tour | `context-ledger.js` | rappelle ce qui n'est ni fait ni cité, et les résultats de sous-agents non traités |
+| Fin de tour | `context-ledger.js` | rappel borné par message humain et par état des livraisons, sans continuation répétée d'un état inchangé |
 | Fin de tour | `memoire/checkpoint.js` | point de contrôle toutes les deux heures |
 | Démarrage d'un sous-agent | `context-ledger.js` | crée sa fiche et lui donne sa consigne (redonnée à son premier outil si cet événement a manqué, ou si sa conversation ne la contient pas) |
 | Fin d'un sous-agent | `context-ledger.js` | marque son résultat « à traiter » |

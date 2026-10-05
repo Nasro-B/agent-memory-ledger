@@ -10,23 +10,24 @@ Les hooks de ce plugin tiennent, sur disque, la liste de ce que l'utilisateur a 
 ## Ce que les hooks font seuls
 
 - Chaque message de l'utilisateur est enregistré mot pour mot : `M-NNNN`, section « À trier ».
-- La liste est réinjectée au début de session, après un compactage, et quand elle change.
+- La partie rattachée à cette conversation est réinjectée au début de session, après un compactage, et quand elle change. Les autres missions restent conservées sans ordre de les exécuter.
 - Chaque sous-agent ou workflow lancé en arrière-plan reçoit une ligne `[agent]`. À sa fin, elle devient « TERMINÉ, résultat à traiter » : tu en es prévenu à ton prochain outil, puis rappelé toutes les 20 minutes tant que le résultat attend.
 - Chaque sous-agent a sa fiche sur disque : sa mission mot pour mot, puis les notes qu'il y ajoute. Elle lui est rendue après un compactage de son contexte. Ce qu'il te signale (une ligne déjà faite, un blocage, une question) t'est dit à ton prochain événement, sans attendre sa fin.
-- À chaque fin de tour, un rappel cite ce qui n'est ni fait ni mentionné dans ta réponse.
+- En fin de tour, un rappel est borné par message humain et par état des livraisons. Un résultat inchangé ne relance pas chaque tour ; il reste sur disque tant qu'il n'est pas prouvé traité.
 
 Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemin et le bon projet. Utilise-la telle quelle.
 
 ## Ce que tu fais
 
 1. **Trier chaque message avant d'agir.** Une ligne par travail demandé, texte mot pour mot : `ajouter --projet P --de M-NNNN "texte"`. Une question ou une simple réponse : `sans-travail --projet P M-NNNN "raison"`.
-2. **Inscrire ce que tu trouves en route** et qui n'est suivi nulle part : `ajouter --projet P "texte"` (sans `--de`). Exception : si tu suis un document de travail (plan à cases, audit, reste à faire), le problème s'ajoute dans ce document, pas ici. Une seule source par problème.
+2. **Inscrire ce que tu trouves en route** et qui n'est suivi nulle part : `ajouter --projet P --session ID "texte"` (sans `--de`). Exception : si tu suis un document de travail (plan à cases, audit, reste à faire), le problème s'ajoute dans ce document, pas ici. Une seule source par problème.
 3. **Lire la sortie de `ajouter`** avant de citer un identifiant : la numérotation est commune à tous les projets et à toutes les sessions.
-4. **Prouver pour retirer.** Aucune commande ne marque « fait ». Quand le travail est fait, cite `[ctx C-NNNN]` dans l'entrée d'historique qui le décrit, ou dans le message du commit. S'il n'est pas fini : `[ctx C-NNNN partiel]`. Le hook retire la ligne sur cette preuve écrite.
+4. **Prouver pour retirer.** `etat` ne marque jamais « fait ». Quand le travail est fait, cite `[ctx C-NNNN]` dans l'entrée d'historique qui le décrit, ou dans le message du commit. Pour un rapport contrôlé : `traiter --projet P --session ID C-NNNN --preuve "controle.md" --executant ID --verification "controle effectue" --resultat accepte` ; le fichier doit porter `statut: traite` et le marqueur exact. `--resultat partiel` exige `statut: partiel` et `[ctx C-NNNN partiel]`, et conserve la ligne active. Une livraison rejetée exige un autre reste ouvert (`--resultat rejete --reste C-NNNN`). Ce reçu ne rejoue pas les preuves : tu dois effectuer le contrôle avant de le déposer.
 5. **Dire l'état.** `etat --projet P C-NNNN en-cours|bloque-utilisateur|ouvert "note"`. `bloque-utilisateur` demande une raison : ce qui attend l'utilisateur.
 6. **Traiter les résultats de sous-agents sans attendre la fin du tour.** Dès que l'étape en cours est finie : lis le résultat, vérifie-le, intègre-le, puis cite `[ctx C-NNNN]`. Jamais de fin de tour avec un résultat non traité sans le dire : si tu ne peux pas dans ce tour, dis à l'utilisateur lequel reste et pourquoi.
 7. **Traiter un signalement de sous-agent dès qu'il est annoncé.** « Déjà fait » : vérifie dans le code ou l'historique ; si c'est exact, ferme la ligne par ta preuve `[ctx C-NNNN]`, sinon réponds-lui. « Bloqué » ou « question » : réponds-lui, il attend.
-8. **Avant de dire « c'est fini » ou « il ne reste que »** : `lister --projet P`, et réponds depuis cette liste. Une ligne « ouverte » n'est pas une ligne « pas faite » : c'est une ligne pas encore prouvée faite. Mesure avant de la refaire.
+8. **Avant de dire « c'est fini » ou « il ne reste que »** : `lister --projet P --session ID`, et réponds depuis cette liste. Une ligne « ouverte » n'est pas une ligne « pas faite » : c'est une ligne pas encore prouvée faite. Mesure avant de la refaire. Une reprise autorisée utilise `reprendre --projet P --session ID C-NNNN` ; une nouvelle conversation ne reprend pas automatiquement tout le projet.
+9. **Faire converger.** Avant de relancer un agent, lire son dernier résultat. Réutiliser les preuves dont la révision et le périmètre sont inchangés. Nommer le manque exact qui justifie une relance ; un rappel de hook ne suffit pas. Respecter les interdictions de délégation et d'écriture, y compris pour les commandes de suivi.
 
 ## Ce que tu ne fais jamais
 

@@ -129,7 +129,7 @@ function menage() {
 }
 
 memoire.avecEntree(input => {
-  if (!AGENT || input.agent_id || input.agent_type) return;
+  if (!AGENT || input.agent_id || input.agent_type || /[\\/]subagents[\\/]/i.test(String(input.transcript_path || ''))) return;
   const evt = String(input.hook_event_name || '');
   const sid = input.session_id;
   const cwd = input.cwd || process.cwd();

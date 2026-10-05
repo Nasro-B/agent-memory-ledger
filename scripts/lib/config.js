@@ -18,8 +18,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const AGENTS = ['claude', 'codex'];
-const SIGNATURES = { claude: 'Claude', codex: 'Codex' };
+const AGENTS = ['claude', 'codex', 'codex-home'];
+const SIGNATURES = { claude: 'Claude', codex: 'Codex', 'codex-home': 'Codex Home' };
 
 function maison() {
   const e = process.env.AGENT_MEMORY_LEDGER_HOME;
