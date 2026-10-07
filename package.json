@@ -1,6 +1,6 @@
 {
   "name": "agent-memory-ledger",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Mémoire partagée et liste de travail pour agents de code (Claude Code et Codex).",
   "private": true,
   "license": "MIT",

@@ -45,6 +45,19 @@ const PLAFOND = core.PLAFOND;
 const PREFIXES_NON_HUMAINS = ['<task-notification>', '<hook_prompt', 'Message Type:', '<subagent_notification', '<turn_aborted>'];
 const RE_CLES_COMMANDE = /^(cmd|command|script)$/i;
 const RE_CLES_DOSSIER = /^(workdir|cwd)$/i;
+const RE_CLE_SHELL = /^shell$/i;
+const RE_POWERSHELL = /^(?:pwsh|powershell)(?:\.exe)?$/i;
+
+// Shell des commandes de Codex quand l'appel ne le nomme pas. Le hook ne le reçoit pas : mesuré le 2026-10-07
+// sur 1 483 commandes réelles, l'entrée est chaque fois { command: "<texte>" }, sans shell. Sous Windows,
+// Codex lance PowerShell (mesuré : 4 718 exécutions sur 4 718 dans 18 conversations, y compris celles des
+// 704 appels qui ne nommaient aucun shell) ; ailleurs, un shell POSIX. CONTEXT_LEDGER_SHELL (powershell ou
+// bash) le fixe quand une installation diffère. La garde s'en sert pour reconnaître l'écriture d'un texte
+// littéral. Limite : un appel qui demanderait un autre shell que celui par défaut n'est pas visible d'ici.
+function shellParDefautPowerShell() {
+  const e = String(process.env.CONTEXT_LEDGER_SHELL || '').trim();
+  return e ? RE_POWERSHELL.test(e) : process.platform === 'win32'; // ancre-mutation:shell-par-defaut
+}
 
 const REGLE_6BIS = 'Règle : un problème trouvé en route et suivi nulle part s\'inscrit ici (ajouter sans --de) ; un travail qui suit un document opérationnel (plan à cases, audit, reste à faire) ne recopie pas ses problèmes ici, le document fait foi et un problème manquant s\'y ajoute en case ; une seule source par problème.';
 const APRES_COMPACTAGE = 'Réinjection après compactage : ce fichier fait foi pour ce qui reste, pas le résumé de compactage.';
@@ -158,17 +171,21 @@ function chainesDe(v, cle, out) {
   return out;
 }
 
-// Analyse d'un appel d'outil : commandes shell, dossiers de travail, patchs, et texte restant.
+// Analyse d'un appel d'outil : commandes shell, dossiers de travail, shells nommés, patchs, et texte restant.
 function analyser(toolName, ti) {
-  const r = { commandes: [], dossiers: [], patchs: [], reste: '' };
+  const r = { commandes: [], dossiers: [], shells: [], patchs: [], reste: '' };
   const patch = textePatch(toolName, ti);
   if (patch !== null) { r.patchs.push(patch); return r; }
   if (ti && typeof ti === 'object' && !Array.isArray(ti)) {
-    const c = enChaine(ti.command !== undefined ? ti.command : (ti.cmd !== undefined ? ti.cmd : ti.script));
+    const brut = ti.command !== undefined ? ti.command : (ti.cmd !== undefined ? ti.cmd : ti.script);
+    const c = enChaine(brut);
     if (c) {
       r.commandes.push(c);
       const d = ti.workdir || ti.cwd;
       if (typeof d === 'string' && d) r.dossiers.push(d);
+      // Shell nommé par l'appel : champ shell, ou programme en tête d'une commande donnée en tableau.
+      if (typeof ti.shell === 'string' && ti.shell) r.shells.push(ti.shell);
+      else if (Array.isArray(brut) && brut.length > 1) r.shells.push(String(brut[0]).split(/[\\/]/).pop());
       return r;
     }
   }
@@ -181,7 +198,7 @@ function analyser(toolName, ti) {
       if (l.cle && RE_CLES_COMMANDE.test(l.cle)) r.commandes.push(l.val);
       else if (l.cle && RE_CLES_DOSSIER.test(l.cle)) r.dossiers.push(l.val);
       else if (estPatch(l.val)) r.patchs.push(l.val);
-      else continue;
+      else { if (l.cle && RE_CLE_SHELL.test(l.cle)) r.shells.push(l.val); continue; }
       texte = texte.split(l.brut).join(' ');
     }
     if (cle && RE_CLES_COMMANDE.test(cle)) { r.commandes.push(val); continue; }
@@ -200,10 +217,13 @@ function gardeCodex(input) {
   if (sousAgent) base.agent_id = input.agent_id || input.agent_type; else delete base.agent_id;
   const tn = String(input.tool_name || '');
   const ti = input.tool_input;
-  const via = (toolName, toolInput) => core.gardeOutil({ input: Object.assign({}, base, { tool_name: toolName, tool_input: toolInput }) });
+  const via = (toolName, toolInput, powershell) => core.gardeOutil({ input: Object.assign({}, base, { tool_name: toolName, tool_input: toolInput }), powershell });
 
   if (core.OUTILS_FICHIER.includes(tn)) return via(tn, ti || {});
   const a = analyser(tn, ti);
+  // PowerShell prouvé : chaque shell nommé par l'appel en est un, et les commandes sans shell nommé partent
+  // dans le shell par défaut. Un seul shell nommé qui n'en est pas un : aucune commande n'est jugée ainsi.
+  const powershell = a.shells.every(s => RE_POWERSHELL.test(s)) && (a.shells.length >= a.commandes.length || shellParDefautPowerShell()); // ancre-mutation:shell-nomme
   for (const p of a.patchs) {
     for (const f of cheminsPatch(p)) {
       const r = via('Write', { file_path: f });
@@ -212,7 +232,7 @@ function gardeCodex(input) {
   }
   const dossierRacine = a.dossiers.some(d => core.texteToucheRacine(d));
   for (const c of a.commandes) {
-    const r = via('Bash', { command: c });
+    const r = via('Bash', { command: c }, powershell);
     if (r) return r;
     if (dossierRacine) {
       // Dossier de travail placé dans la racine : lecture seulement (CLI restreinte pour un sous-agent).
@@ -672,7 +692,7 @@ function surPostCompact(input) {
 // Codex : le Stop {decision:block} fait continuer le tour, ce qu'un texte ajouté après un outil ne fait pas
 // (l'additionalContext d'un PostToolUse arrive bien au modèle, en message « developer » : observé dans des
 // rollouts réels le 2026-10-02). Il porte donc, une fois par message humain :
-//  - le rappel du noyau (M du tour à trier, lignes du tour ni faites ni citées) ;
+//  - le rappel du noyau (M du tour à trier ; les lignes du tour non citées ne sont plus rappelées) ;
 //  - sinon, les M de CETTE session encore à trier (ex. un premier message suivi d'un second dans le même
 //    tour : le noyau ne suit que le dernier) ;
 //  - une fois par état des livraisons, les résultats encore non traités ;
@@ -708,10 +728,7 @@ function surStop(input) {
   try { core.assurerVues(AGENT); } catch (_) { /* la vue sera refaite au prochain événement */ }
   let texte = '';
   try {
-    texte = core.rappelStop({
-      agent: AGENT, sessionId: input.session_id, promptId: input.turn_id,
-      dernierMessage: input.last_assistant_message, script: SCRIPT,
-    });
+    texte = core.rappelStop({ agent: AGENT, sessionId: input.session_id, promptId: input.turn_id, script: SCRIPT });
   } catch (_) { texte = ''; } // verrou occupé jusqu'à l'échéance : les livraisons sont rappelées quand même
   const s = core.lireSession(AGENT, input.session_id);
   if (!s || !s.projet) return;

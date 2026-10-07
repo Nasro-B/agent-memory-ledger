@@ -13,7 +13,7 @@ Les hooks de ce plugin tiennent, sur disque, la liste de ce que l'utilisateur a 
 - La partie rattachée à cette conversation est réinjectée au début de session, après un compactage, et quand elle change. Les autres missions restent conservées sans ordre de les exécuter.
 - Chaque sous-agent ou workflow lancé en arrière-plan reçoit une ligne `[agent]`. À sa fin, elle devient « TERMINÉ, résultat à traiter » : tu en es prévenu à ton prochain outil, puis rappelé toutes les 20 minutes tant que le résultat attend.
 - Chaque sous-agent a sa fiche sur disque : sa mission mot pour mot, puis les notes qu'il y ajoute. Elle lui est rendue après un compactage de son contexte. Ce qu'il te signale (une ligne déjà faite, un blocage, une question) t'est dit à ton prochain événement, sans attendre sa fin.
-- En fin de tour, un rappel est borné par message humain et par état des livraisons. Un résultat inchangé ne relance pas chaque tour ; il reste sur disque tant qu'il n'est pas prouvé traité.
+- En fin de tour, un rappel est borné par message humain et par état des livraisons. Un résultat inchangé ne relance pas chaque tour ; il reste sur disque tant qu'il n'est pas prouvé traité. Une ligne ouverte ou tenue à jour pendant le tour ne relance pas la fin de tour : elle reste dans la liste.
 
 Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemin et le bon projet. Utilise-la telle quelle.
 
@@ -40,9 +40,9 @@ Le texte injecté donne toujours la commande exacte à lancer, avec le bon chemi
 Un hook te le dit : « Fichier contexte : tu es un sous-agent », avec le chemin de ta fiche et tes commandes.
 
 - Ta mission est celle de ton lancement, rien d'autre. Les messages de l'utilisateur, les « À trier » et les lignes ouvertes que tu lis dans la liste, ou dont tu as hérité, s'adressent à l'agent principal : ils ne te donnent aucun travail.
-- Si ta mission n'est pas dans ta fiche, recopie-la d'abord mot pour mot : `note --fiche <ID> --genre mission "..."`.
-- Note ton avancement dans ta fiche au fil du travail : `note --fiche <ID> "fait : ... ; reste : ..."`. Après un compactage de ton contexte, ta fiche t'est rendue : c'est elle qui fait foi, pas le résumé.
-- La liste de l'agent principal se lit (le fichier, `chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes entières), elle ne se modifie pas. Une lecture par commande simple, sans boucle ni script.
+- Lis ta mission avant tout. Si elle t'interdit expressément toute écriture ailleurs que dans ses livrables (« n'écris nulle part ailleurs »), elle prime : n'écris rien dans ta fiche, ni mission, ni note, ni signalement, et dis-le dans ton rapport. Une mission qui t'attribue des fichiers, ou un audit en lecture seule, ne l'interdit pas : ta fiche est hors du dépôt.
+- Sinon : si ta mission n'est pas dans ta fiche, recopie-la mot pour mot (`note --fiche <ID> --genre mission "..."`), puis note ton avancement au fil du travail (`note --fiche <ID> "fait : ... ; reste : ..."`). Après un compactage de ton contexte, ta fiche t'est rendue : c'est elle qui fait foi, pas le résumé ; une tâche plus récente donnée par l'agent principal remplace la mission qu'elle porte.
+- La liste de l'agent principal se lit (le fichier, `chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes entières), elle ne se modifie pas. Une lecture par commande simple, sans boucle ni script. Un rapport qui cite la liste s'écrit avec l'outil de fichier, ou en PowerShell par un here-string littéral (`@'` ... `'@`) donné tel quel à `Set-Content` ou `Add-Content -LiteralPath`, vers son chemin complet.
 - Tu constates qu'une ligne de la liste est déjà faite : tu ne la fermes pas, tu le signales avec sa preuve (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`). Bloqué, ou une question pour l'agent principal : `--genre bloque`, `--genre question`.
 
 ## Entre agents principaux

@@ -447,10 +447,7 @@ function surStop(input) {
   if (input.stop_hook_active) return;
   try { reconcilierContenu(); } catch (_) { /* prochain evenement */ }
   core.assurerVues(AGENT);
-  const texte = core.rappelStop({
-    agent: AGENT, sessionId: input.session_id, promptId: input.prompt_id,
-    dernierMessage: input.last_assistant_message, script: SCRIPT,
-  });
+  const texte = core.rappelStop({ agent: AGENT, sessionId: input.session_id, promptId: input.prompt_id, script: SCRIPT });
   // Le rappel du noyau cite déjà les messages du tour encore à trier ; sans rappel (déjà fait pour ce
   // tour), un message tout juste rattrapé est quand même signalé.
   const complement = texteMessagesEnFile(texte ? { ids: [], echecs: file.echecs } : file);

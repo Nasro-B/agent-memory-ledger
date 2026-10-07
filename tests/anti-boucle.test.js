@@ -210,8 +210,13 @@ test('une session ne cloture pas une mission etrangere sans reprise explicite', 
   assert.equal(c.executerCli(args, { agent: 'codex', script: 'ledger.js' }).code, 0);
 }));
 
-for (const agent of ['codex', 'codex-home']) test(`${agent} : une fin repetee ne bloque plus le parent`, () => cas('adaptateur-' + agent, (c, base) => {
-  const script = process.env[agent === 'codex' ? 'AML_CODEX_TEST' : 'AML_HOME_TEST'] || path.join(__dirname, `../scripts/${agent}/context-ledger.js`);
+// Une installation qui a un second adaptateur Codex (un autre dossier de configuration, avec sa propre identite)
+// le teste avec les memes bancs : AML_HOME_AGENT (son identite), AML_HOME_TEST (son script) et
+// AML_HOME_DOSSIER (le nom du dossier qui la designe). Sans ces variables, seul l'adaptateur du depot est teste.
+const SECOND = process.env.AML_HOME_AGENT ? { agent: process.env.AML_HOME_AGENT, script: process.env.AML_HOME_TEST, dossier: process.env.AML_HOME_DOSSIER } : null;
+const ADAPTATEURS = [{ agent: 'codex', script: process.env.AML_CODEX_TEST || path.join(__dirname, '../scripts/codex/context-ledger.js') }].concat(SECOND ? [SECOND] : []);
+
+for (const { agent, script } of ADAPTATEURS) test(`${agent} : une fin repetee ne bloque plus le parent`, () => cas('adaptateur-' + agent, (c, base) => {
   const sid = 'parent-a';
   c.lierSession(agent, sid, base);
   const id = c.suivreTache({ agent, sessionId: sid, cwd: base, tache: { id: 'enfant-a', titre: 'Controle', genre: 'worker' } });
@@ -247,7 +252,7 @@ test('le rappel Claude reconnait le chemin dun sous-agent sans agent_id', () => 
   assert.equal(r.stdout.trim(), '');
 });
 
-test('les identites Codex et Codex Home restent distinctes', () => cas('identites', c => {
-  assert.equal(c.agentDepuisChemin(path.join(baseTests, '.codex-home', 'hooks', 'scripts')), 'codex-home');
-  assert.notEqual(c.chemins('_general', 'codex').json, c.chemins('_general', 'codex-home').json);
+if (SECOND && SECOND.dossier) test('un second adaptateur garde une identite distincte', () => cas('identites', c => {
+  assert.equal(c.agentDepuisChemin(path.join(baseTests, SECOND.dossier, 'hooks', 'scripts')), SECOND.agent);
+  assert.notEqual(c.chemins('_general', 'codex').json, c.chemins('_general', SECOND.agent).json);
 }));

@@ -43,6 +43,8 @@ Le réconciliateur suit les fichiers de preuve modifiés. Il écrit son curseur 
 - Une reprise autorisée passe par `reprendre --projet P --session <ID> C-NNNN`.
 - Une fin identique est ignorée. Une nouvelle livraison encore en attente met à jour la même ligne ; une nouvelle livraison après clôture crée une nouvelle ligne.
 - Au Stop, le même état des livraisons n'est rappelé qu'une fois. Les annonces pendant le tour et les rappels espacés restent disponibles. Une absence de rappel n'est jamais une preuve d'achèvement.
-- Après compactage, le sous-agent reçoit sa propre fiche. Il ne reprend pas la liste ni les demandes héritées du parent.
+- Au Stop, une ligne ouverte ou tenue à jour pendant le tour ne relance pas l'agent : elle reste dans la liste, qui fait foi. Seuls un message pas encore trié et un résultat de sous-agent pas encore traité relancent la fin de tour.
+- Après compactage, le sous-agent reçoit sa propre fiche. Il ne reprend pas la liste ni les demandes héritées du parent. Une tâche plus récente donnée par le parent (une relance) remplace la mission portée par la fiche.
+- La mission prime sur la fiche : un sous-agent dont la mission interdit expressément toute écriture ailleurs que dans ses livrables n'écrit rien dans sa fiche, et le dit dans son rapport. Un audit en lecture seule n'interdit pas la fiche, qui est hors du dépôt.
 
 Une relance doit répondre à un manque nommé, après lecture du résultat existant. Une interdiction de délégation prime sur un rappel de hook. Les sécurités de commandes et de suivi restent actives.

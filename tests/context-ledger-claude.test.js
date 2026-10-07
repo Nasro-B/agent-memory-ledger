@@ -63,18 +63,19 @@ function envPour(dir) {
   return env;
 }
 
-function hook(dir, payload) {
-  const r = spawnSync(process.execPath, [HOOK], {
-    input: JSON.stringify(payload), env: envPour(dir), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
+// plus : { node: options de node avant le script, env: variables propres à cet appel } (voir sousVerrou).
+function hook(dir, payload, plus = null) {
+  const r = spawnSync(process.execPath, [...(plus ? plus.node : []), HOOK], {
+    input: JSON.stringify(payload), env: Object.assign(envPour(dir), plus ? plus.env : {}), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
   });
   const out = (r.stdout || '').trim();
   return { code: r.status, out, err: r.stderr, json: out ? JSON.parse(out) : null };
 }
 
-function cli(dir, args) {
+function cli(dir, args, plus = null) {
   if (args[0] === 'ajouter' && !args.includes('--session')) args = [...args, '--session', 'sess-1'];
-  const r = spawnSync(process.execPath, [HOOK, ...args], {
-    env: envPour(dir), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
+  const r = spawnSync(process.execPath, [...(plus ? plus.node : []), HOOK, ...args], {
+    env: Object.assign(envPour(dir), plus ? plus.env : {}), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
   });
   return { code: r.status, out: r.stdout || '', err: r.stderr || '' };
 }
@@ -119,10 +120,10 @@ function journal(dir, projet = PROJET, agent = 'claude') {
     .split('\n').filter(Boolean).map(l => JSON.parse(l));
 }
 
-function ups(dir, prompt, extra = {}) {
+function ups(dir, prompt, extra = {}, plus = null) {
   return hook(dir, Object.assign({
     hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt_id: 'p-1', cwd: CWD_PROJET, prompt,
-  }, extra));
+  }, extra), plus);
 }
 
 function contexte(r) {
@@ -605,6 +606,134 @@ test('garde : sous-agent : sous-expressions de lecture, blocs sans effet, Where-
   assert.match(h.out, /un identifiant \(chercher C-0151 C-0152 M-0042\) rend la ligne ou le message entier/);
 });
 
+// Constat réel du 2026-10-07 : 6 écritures refusées chez 5 sous-agents qui écrivaient LEUR rapport, hors de
+// la racine, parce que son texte citait la liste de travail ou la commande context-ledger ; chacun y a perdu
+// un tour, trois ont écrit à l'orchestrateur. Formes ci-dessous : les commandes relevées (chemins et textes
+// remplacés) et leurs variantes dangereuses. Un here-string littéral n'est inerte qu'en PowerShell, et ses
+// limites sont celles de l'analyseur de PowerShell 7.6, consulté sans rien exécuter : il se ferme aussi sur
+// une apostrophe typographique ou après un retour chariot seul, et collé à un mot il n'en est plus un.
+test('garde : sous-agent : son rapport, écrit en PowerShell par un here-string littéral qui cite la liste, passe ; sans preuve du shell, ou si le texte ou la commande servent à autre chose, refus', () => {
+  const dir = dossier('garde-rapport');
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const S = 'node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js"';
+  const RAPPORT = 'D:\\travail\\rapports\\controle-g03.md';
+  const TEXTE = [
+    '# Contrôle G03', '',
+    `- Suivi : \`C-0352\` dans \`${R}\\projet-demo.claude\\C-0352.txt\`, l'état est « bloqué » ; l\u2019interdiction tient.`,
+    `- Commande : \`${S} chercher --projet projet-demo --agent claude C-0352\`.`,
+    `> ${R}\\projet-demo.claude.md:322 : ligne citée ; $env:USERPROFILE et $(Get-Date) restent du texte.`,
+  ].join('\n');
+  const H = `@'\n${TEXTE}\n'@`;
+  const juge = (tool_name, command, qui = { agent_id: 'a42' }, powershell) => avecRacine(dir, () => core.gardeOutil({
+    input: Object.assign({ hook_event_name: 'PreToolUse', tool_name, tool_input: { command }, cwd: CWD_PROJET }, qui), powershell,
+  }));
+  const permises = [
+    // Les cinq formes relevées : variable puis Set-Content suivi de lectures de contrôle, garde-fou avant
+    // d'écrire, here-string donné par un tube, cible nommée dans la commande.
+    `$out='${RAPPORT}'; $body=${H}; Set-Content -LiteralPath $out -Value $body -Encoding utf8; Write-Output '--- WRITTEN TARGET ---'; Get-Item -LiteralPath $out | Select-Object FullName,Length; Write-Output '--- LINE COUNT ---'; & wc.exe -l $out; Get-Content -LiteralPath $out -TotalCount 1`,
+    `$p = '${RAPPORT}'; if (Test-Path -LiteralPath $p) { throw 'Le rapport cible existe déjà, écriture annulée.' }; $content = ${H}; Set-Content -LiteralPath $p -Value $content -Encoding utf8; Get-Item -LiteralPath $p | Select-Object FullName,Length; (Get-Content -LiteralPath $p | Measure-Object -Line).Lines`,
+    `$p='${RAPPORT}'; ${H} | Add-Content -LiteralPath $p -Encoding utf8`,
+    `${H} | Add-Content -LiteralPath '${RAPPORT}' -Encoding UTF8`,
+    // Variantes sans plus d'effet : valeur donnée en argument, Out-File, garde-fou sur le dossier, fins de ligne
+    // Windows, et une lecture de la liste dans la même commande.
+    `Set-Content -LiteralPath "${RAPPORT}" -Value ${H} -Encoding utf8 -NoNewline`,
+    `${H} | Out-File -FilePath '${RAPPORT}' -Encoding utf8 -Append`,
+    `$d='D:\\travail\\rapports'; if (-not (Test-Path -LiteralPath $d -PathType Container)) { throw "dossier absent" }\r\n${H} | Set-Content -LiteralPath '${RAPPORT}' -ErrorAction Stop`,
+    `@'\r\n${TEXTE.replace(/\n/g, '\r\n')}\r\n'@ | Add-Content -LiteralPath '${RAPPORT}'`,
+    `${H} | Add-Content -LiteralPath '${RAPPORT}'; ${S} chercher --projet projet-demo C-0352; Get-Content -LiteralPath '${R}\\projet-demo.claude\\C-0352.txt'`,
+  ];
+  for (const cmd of permises) {
+    const court = cmd.replace(TEXTE, '<texte>').replace(TEXTE.replace(/\n/g, '\r\n'), '<texte>');
+    assert.equal(juge('PowerShell', cmd), null, `devait permettre : ${court}`);
+    assert.equal(juge('mcp__Windows-MCP__PowerShell', cmd), null, `devait permettre (outil MCP) : ${court}`);
+    assert.equal(juge('Bash', cmd, undefined, true), null, `devait permettre (adaptateur qui prouve PowerShell) : ${court}`);
+    assert.equal(juge('PowerShell', cmd, {}), null, `devait permettre à l'orchestrateur : ${court}`);
+    // En bash, les mêmes caractères seraient du code : sans preuve du shell, refus comme avant.
+    assert.ok(juge('Bash', cmd), `sans preuve du shell, devait refuser : ${court}`);
+    assert.ok(juge('Bash', cmd, {}), `sans preuve du shell, devait refuser à l'orchestrateur : ${court}`);
+  }
+  const refusees = [
+    // Le texte, la cible ou le reste de la commande visent la racine.
+    [`${H} | Set-Content -LiteralPath '${R}\\projet-demo.claude.md'`, 'cible dans la racine'],
+    [`$p='${RAPPORT}'; $p='${R}\\x.md'; ${H} | Set-Content -LiteralPath $p`, 'cible affectée deux fois'],
+    [`$s=@'\n${R}\\x.md\n'@; Remove-Item -LiteralPath $s`, 'le texte sert de chemin'],
+    [`$s=${H}; Set-Content -LiteralPath '${RAPPORT}' -Value $s; Invoke-Expression $s`, 'le texte est exécuté'],
+    [`${H} | Set-Content -LiteralPath '${RAPPORT}'; Get-Content -LiteralPath '${RAPPORT}' | Invoke-Expression`, 'le fichier écrit est exécuté'],
+    [`${H} | Set-Content -LiteralPath '${RAPPORT}'; Remove-Item -LiteralPath '${R}\\x.md'`, 'le reste efface dans la racine'],
+    [`${H} | Set-Content -LiteralPath '${RAPPORT}'; ${S} ajouter --projet x "y"`, 'le reste écrit par la CLI', 'permis à l\'orchestrateur'],
+    [`Set-Content -LiteralPath ${H} -Value 'x'`, 'le texte sert de cible'],
+    // La cible n'est pas un fichier de texte nommé en toutes lettres.
+    [`${H} | Set-Content -LiteralPath 'D:\\travail\\rapports\\suite.ps1'`, 'script'],
+    [`${H} | Set-Content -LiteralPath 'rapport.md'`, 'chemin relatif'],
+    [`${H} | Set-Content -LiteralPath 'Variable:\\x.md'`, 'lecteur de fournisseur'],
+    [`${H} | Set-Content -Path 'D:\\travail\\*\\rapport.md'`, 'joker'],
+    [`${H} | Set-Content -LiteralPath "$env:USERPROFILE\\rapport.md"`, 'variable dans le chemin'],
+    [`${H} | Set-Content -LiteralPath 'D:\\travail\\rapport.md:flux.md'`, 'flux'],
+    [`${H} | Set-Content -LiteralPath '\\\\serveur\\partage\\rapport.md'`, 'chemin réseau'],
+    [`$p=Join-Path 'D:\\travail' 'rapport.md'; ${H} | Set-Content -LiteralPath $p`, 'cible calculée'],
+    // La forme n'est pas celle qui est prouvée.
+    [`@"\n${TEXTE}\n"@ | Set-Content -LiteralPath '${RAPPORT}'`, 'here-string développé'],
+    [`${H} | Set-Content '${RAPPORT}'`, 'chemin sans nom de paramètre'],
+    [`$s=${H}; Set-Content -LiteralPath '${RAPPORT}' -Value $s -PassThru | Invoke-Expression`, 'écriture qui continue'],
+    [`${H} | ForEach-Object { $_ } | Set-Content -LiteralPath '${RAPPORT}'`, 'texte transformé avant l\'écriture'],
+    [`${H} | Set-Content -LiteralPath '${RAPPORT}'; ${H} | Add-Content -LiteralPath '${RAPPORT}'`, 'deux here-strings'],
+    [`Write-Output a${H} | Set-Content -LiteralPath '${RAPPORT}'`, 'here-string collé à un mot'],
+    [`${H} | Set-Content -LiteralPath '${RAPPORT}' # l'ancien rapport`, 'commentaire'],
+    [`[System.IO.File]::AppendAllText('${RAPPORT}', ${H})`, 'méthode .NET (forme relevée, non prouvée : l\'outil de fichier la remplace)'],
+    // Ce que PowerShell lit autrement qu'une lecture naïve : pour lui, chacune de ces commandes efface x.md.
+    [`Write-Output a # l'ancien\nRemove-Item '${R}\\x.md' # d'avant\n${H} | Set-Content -LiteralPath '${RAPPORT}'`, 'commentaires dont les apostrophes cachent une commande'],
+    [`Write-Output 'a \u2019 ; Remove-Item -LiteralPath '${R}\\x.md' ; \u2018 b'; ${H} | Set-Content -LiteralPath '${RAPPORT}'`, 'guillemet typographique hors du texte'],
+    [`${H} | Set-Content -LiteralPath 'D:\\travail\\a\u2019 ; Invoke-Expression z ; \u2018b.md'`, 'guillemet typographique dans la cible : pour PowerShell, une commande de plus'],
+    [`$p='${RAPPORT}'; $s=@'\nA\n\u2019@; Remove-Item -LiteralPath '${R}\\x.md'; $t='\n'@; Set-Content -LiteralPath $p -Value $s`, 'here-string fermé par une apostrophe typographique'],
+    [`$p='${RAPPORT}'; $s=@'\rA\r'@; Remove-Item -LiteralPath '${R}\\x.md'; $t='\n'@; Set-Content -LiteralPath $p -Value $s`, 'here-string fermé après un retour chariot seul'],
+  ];
+  for (const [cmd, pourquoi, orchestrateur] of refusees) {
+    assert.ok(juge('PowerShell', cmd), `devait refuser (${pourquoi}) : ${cmd.replace(TEXTE, '<texte>')}`);
+    if (orchestrateur) assert.equal(juge('PowerShell', cmd, {}), null, `${orchestrateur} (${pourquoi})`);
+    else assert.ok(juge('PowerShell', cmd, {}), `devait refuser à l'orchestrateur (${pourquoi})`);
+  }
+  // Bout en bout par le vrai hook : l'outil PowerShell passe, l'outil Bash refuse et dit quoi faire.
+  assert.equal(preTool(dir, 'PowerShell', { command: permises[2] }, { agent_id: 'a42' }).out, '');
+  const r = preTool(dir, 'Bash', { command: permises[2] }, { agent_id: 'a42' });
+  assert.ok(estRefuse(r), r.out);
+  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /Si tu écrivais un fichier à toi \(rapport, notes\) dont le texte cite ce dossier ou cette commande : passe par l'outil de fichier \(apply_patch, Write\)/);
+  const o = preTool(dir, 'Bash', { command: permises[2] });
+  assert.ok(estRefuse(o), o.out);
+  assert.match(o.json.hookSpecificOutput.permissionDecisionReason, /^Sur la racine contexte, le shell ne sert qu'à lire.*here-string littéral donné tel quel à l'écriture/);
+});
+
+// Trouvé en corrigeant le test précédent, et vérifié avec l'analyseur de PowerShell 7.6 sans rien exécuter :
+// il prend une apostrophe typographique pour une apostrophe (elle ouvre et ferme une chaîne), et ne lit pas
+// dans un commentaire l'apostrophe qui, pour la garde, ouvrait une chaîne et cachait la ligne suivante. Une
+// commande qui avait l'air d'une lecture pouvait donc porter une écriture. Mesuré avant de refuser ces
+// formes : sur 5 447 commandes exécutées par un agent en trois jours, dont 510 regardées par la garde,
+// aucune ne change de verdict.
+test('garde : sous-agent : ce que PowerShell lit autrement (guillemet typographique, commentaire) est refusé ; l\'apostrophe typographique d\'une note entre guillemets doubles passe', () => {
+  const dir = dossier('garde-ambigue');
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const S = 'node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js"';
+  const juge = (command, qui = { agent_id: 'a42' }) => avecRacine(dir, () => core.gardeOutil({ input: Object.assign({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd: CWD_PROJET }, qui) }));
+  for (const [cmd, pourquoi] of [
+    // Pour PowerShell, chacune de ces commandes efface x.md ou écrit dans la liste.
+    [`Write-Output 'a \u2019 ; Remove-Item -LiteralPath '${R}\\x.md' ; \u2018 b'`, 'chaîne fermée par une apostrophe typographique'],
+    [`Get-Content '${R}\\y.md' ; Write-Output \u2018a\u2019`, 'apostrophe typographique hors de toute chaîne'],
+    [`Get-Content '${R}\\y.md' | Select-String "a \u201D ; Remove-Item '${R}\\x.md' ; \u201C b"`, 'chaîne fermée par un guillemet double typographique'],
+    [`Get-Content '${R}\\y.md' # l'ancien\nRemove-Item '${R}\\x.md' # d'avant`, 'commentaires dont les apostrophes cachent une commande'],
+  ]) {
+    assert.ok(juge(cmd), `devait refuser (${pourquoi}) : ${cmd}`);
+    assert.ok(juge(cmd, {}), `devait refuser à l'orchestrateur (${pourquoi})`);
+  }
+  // Appel de la CLI seul, sans viser la racine : la même ruse y cachait une écriture de la liste.
+  assert.ok(juge(`${S} chercher --projet x 'a \u2019 ; ${S} ajouter --projet x y ; \u2018 b'`), 'CLI : chaîne fermée par une apostrophe typographique');
+  // Sans effet dans les deux lectures, donc permis : le texte français d'une note ou d'un motif.
+  for (const cmd of [
+    `${S} note --fiche a42 "fait : l\u2019audit est lu, l\u2019\u00e9tat tient"`,
+    `Get-Content -LiteralPath '${R}\\y.md' | Select-String "l\u2019\u00e9tat"`,
+    `Get-Content -LiteralPath '${R}\\y.md' | Select-String '\u201Ccit\u00e9\u201D'`,
+    `Select-String -LiteralPath '${R}\\y.md' -Pattern '^# Titre'`,
+  ]) assert.equal(juge(cmd), null, `devait permettre : ${cmd}`);
+});
+
 // Règle : la citation doit venir d'un message écrit APRÈS la création de la ligne.
 test('abandon : citation absente ou tirée de la demande d\'origine refusée, contre-ordre postérieur accepté', () => {
   const dir = dossier('abandon');
@@ -677,18 +806,34 @@ test('Stop rappelle une seule fois par prompt_id', () => {
   assert.equal(r1.json.hookSpecificOutput.hookEventName, 'Stop');
   assert.match(contexte(r1), /M-0001/);
   assert.equal(stop('p-1').out, '', 'second Stop du même prompt : aucun rappel');
-  // Nouveau message : nouveau rappel ; lignes du tour non citées rappelées, citées non.
+  // Nouveau message non trié : nouveau rappel, pour ce message seulement.
   ups(dir, 'Et ajoute un test', { prompt_id: 'p-2' });
-  cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0002', 'Ajouter un test']);
   const r2 = stop('p-2', 'J\'ai commencé.');
-  assert.match(contexte(r2), /C-0001 \(ouvert\)/);
-  assert.ok(!/encore à trier/.test(contexte(r2)), 'M-0002 converti : plus à trier');
+  assert.match(contexte(r2), /encore à trier : M-0002\./);
   ups(dir, 'Merci', { prompt_id: 'p-3' });
   cli(dir, ['sans-travail', '--projet', PROJET, 'M-0003', 'remerciement']);
-  assert.equal(stop('p-3', 'Rien à faire.').out, '', 'vieilles lignes non rappelées à chaque tour');
-  ups(dir, 'Encore une chose', { prompt_id: 'p-4' });
-  cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0004', 'Chose']);
-  assert.equal(stop('p-4', 'C-0002 est ouvert, je continue au prochain tour.').out, '', 'ligne citée : pas de rappel');
+  assert.equal(stop('p-3', 'Rien à faire.').out, '', 'message trié : aucun rappel');
+});
+
+// Constaté dans des sessions réelles (2026-10-07) : le rappel « lignes créées ou modifiées pendant ce tour,
+// ni faites ni citées dans ta réponse » revenait à presque chaque tour (5 tours sur 7 dans une conversation
+// de dépannage, où la ligne était tenue à jour à chaque message) ; l'agent donnait une seconde réponse sans
+// rien changer. La ligne reste dans la liste, qui fait foi : la fin de tour ne relance plus pour cela.
+test('fin de tour : une ligne créée ou tenue à jour pendant le tour ne relance pas l\'agent, qu\'elle soit citée ou non', () => {
+  const dir = dossier('stop-lignes-du-tour');
+  const stop = (pid, msg = '') => hook(dir, { hook_event_name: 'Stop', session_id: 'sess-1', prompt_id: pid, stop_hook_active: false, last_assistant_message: msg });
+  ups(dir, 'Mon partage de connexion ne marche pas');
+  assert.equal(cli(dir, ['ajouter', '--projet', PROJET, '--session', 'sess-1', '--de', 'M-0001', 'Mon partage de connexion ne marche pas']).code, 0);
+  assert.equal(stop('p-1', 'Vérifie d\'abord l\'adresse IP du second poste.').out, '', 'ligne ouverte du tour, non citée : pas de relance');
+  ups(dir, 'toujours rien', { prompt_id: 'p-2' });
+  assert.equal(cli(dir, ['sans-travail', '--projet', PROJET, 'M-0002', 'retour sur le dépannage en cours']).code, 0);
+  assert.equal(cli(dir, ['etat', '--projet', PROJET, 'C-0001', 'en-cours', 'attend le résultat de ipconfig']).code, 0);
+  assert.equal(stop('p-2', 'Envoie-moi le résultat de ipconfig.').out, '', 'ligne tenue à jour pendant le tour, non citée : pas de relance');
+  assert.equal(stop('p-2', 'Envoie-moi le résultat de ipconfig.').out, '');
+  // Rien n'est perdu : la ligne est toujours dans la liste, avec son état et sa note.
+  assert.equal(etat(dir).lignes['C-0001'].statut, 'en-cours');
+  assert.equal(etat(dir).lignes['C-0001'].note, 'attend le résultat de ipconfig');
+  assert.match(cli(dir, ['lister', '--projet', PROJET, '--session', 'sess-1']).out, /C-0001/);
 });
 
 test('10 processus en parallèle : aucun ID perdu ni dupliqué', async () => {
@@ -701,16 +846,28 @@ test('10 processus en parallèle : aucun ID perdu ni dupliqué', async () => {
     }));
   }
   const res = await Promise.all(taches);
-  res.forEach((r, i) => assert.equal(r.code, 0, `processus ${i} : ${r.err || ''}`));
+  // Sous très forte charge, un processus peut épuiser ses réessais sur un verrou occupé. Ce n'est pas une
+  // perte : la CLI le dit et n'écrit rien, un message est gardé mot pour mot en copie de secours. Le banc
+  // vérifie donc ce contrat (tout est écrit ou gardé, rien en double, numéros sans trou), au lieu d'exiger que
+  // les vingt aboutissent du premier coup : constat du 2026-10-03, machine chargée, 1 message sur 10 en
+  // secours, rien de perdu, banc rouge à tort.
+  const clis = res.slice(0, 10);
+  const hooks = res.slice(10);
+  clis.forEach((r, i) => assert.ok(r.code === 0 || /verrou occupé/.test(r.err || ''), `CLI ${i} : ${r.err || ''}`));
+  hooks.forEach((r, i) => assert.equal(r.code, 0, `hook ${i}`));
+  const nC = clis.filter(r => r.code === 0).length;
+  const fSecours = path.join(dir, '.secours-claude.jsonl');
+  const secours = fs.existsSync(fSecours) ? fs.readFileSync(fSecours, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l).texte) : [];
   const e = etat(dir);
   const cs = Object.keys(e.lignes).sort();
   const ms = Object.keys(e.demandes).sort();
-  const attendus = p => Array.from({ length: 10 }, (_, i) => `${p}-${String(i + 1).padStart(4, '0')}`);
-  assert.deepEqual(cs, attendus('C'));
-  assert.deepEqual(ms, attendus('M'));
-  assert.equal(new Set(Object.values(e.lignes).map(l => l.texte)).size, 10);
-  assert.equal(new Set(Object.values(e.demandes).map(d => d.texte)).size, 10);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, '.compteur'), 'utf8')), { M: 10, C: 10 });
+  const attendus = (p, n) => Array.from({ length: n }, (_, i) => `${p}-${String(i + 1).padStart(4, '0')}`);
+  assert.deepEqual(cs, attendus('C', nC), 'une ligne par commande aboutie, numéros sans trou');
+  assert.deepEqual(ms, attendus('M', 10 - secours.length), 'un M par message enregistré, numéros sans trou');
+  assert.equal(new Set(Object.values(e.lignes).map(l => l.texte)).size, nC);
+  const messages = Object.values(e.demandes).map(d => d.texte).concat(secours).sort();
+  assert.deepEqual(messages, Array.from({ length: 10 }, (_, i) => `message parallèle ${i}`).sort(), 'chaque message est enregistré ou gardé en secours, une seule fois');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, '.compteur'), 'utf8')), { M: 10 - secours.length, C: nC });
   const restes = fs.readdirSync(path.join(dir, '.etat')).filter(n => /\.(lock|tmp)$/.test(n));
   assert.deepEqual(restes, []);
 });
@@ -967,7 +1124,7 @@ test('UserPromptSubmit : verrou bloqué, message conservé en secours et signal�
   assert.equal(secours[0].texte, 'Pendant le verrou : ajoute le test X');
 });
 
-test('Stop : 800 lignes du tour, sortie <= 9 000 et commande etat lisible', () => {
+test('Stop : message à trier et 800 lignes ouvertes pendant le tour, sortie <= 9 000 et commande de tri lisible', () => {
   const dir = dossier('stop-plafond');
   ups(dir, 'Fais tout');
   avecRacine(dir, () => {
@@ -976,8 +1133,9 @@ test('Stop : 800 lignes du tour, sortie <= 9 000 et commande etat lisible', () =
   const r = hook(dir, { hook_event_name: 'Stop', session_id: 'sess-1', prompt_id: 'p-1', stop_hook_active: false, last_assistant_message: '' });
   const ctx = contexte(r);
   assert.ok(ctx.length <= 9000, `longueur ${ctx.length}`);
-  assert.match(ctx, /et 770 autre\(s\)/);
-  assert.match(ctx, /etat --projet projet-demo C-NNNN/);
+  assert.match(ctx, /encore à trier : M-0001\./);
+  assert.match(ctx, /ajouter --projet projet-demo --session sess-1 --de M-0001/);
+  assert.ok(!/créées ou modifiées pendant ce tour/.test(ctx), 'les lignes du tour ne sont plus énumérées en fin de tour');
 });
 
 test('abandon : citation cherchée dans le journal, pas dans un faux message ajouté au JSON', () => {
@@ -1008,8 +1166,11 @@ function copie(nom, fichierRel, ancre, remplacement) {
     const cible = path.join(dest, fichierRel);
     const avant = fs.readFileSync(cible, 'utf8');
     const lignes = avant.split('\n');
-    const i = lignes.findIndex(l => l.includes(ancre));
+    // Ancre entière et unique : « x » ne doit jamais désigner la ligne de « x-suite ».
+    const porte = l => { const k = l.indexOf(ancre); return k >= 0 && !/[\w-]/.test(l[k + ancre.length] || ''); };
+    const i = lignes.findIndex(porte);
     assert.ok(i >= 0, `ancre ${ancre} introuvable dans ${fichierRel}`);
+    assert.equal(lignes.filter(porte).length, 1, `ancre ${ancre} présente plusieurs fois dans ${fichierRel}`);
     lignes[i] = remplacement;
     fs.writeFileSync(cible, lignes.join('\n'));
     assert.notEqual(fs.readFileSync(cible, 'utf8'), avant);
@@ -1071,29 +1232,23 @@ test('mutation : règle 6 bis retirée du message ou du démarrage -> banc rouge
 
 // Verrou tenu par un autre processus pendant 5,5 s (plus que les 3 s d'attente du noyau) : sans réessai,
 // la commande échoue « verrou occupé » ; avec réessai, elle aboutit dès que le verrou se libère.
-// Deux bornes, d étant le temps de démarrage du processus. Sans réessai, l'échec demande d + 3 s < durée du
-// verrou. Avec réessai, le message abandonne vers d + 6,1 s (DELAI_MESSAGE_MS = 6 s) : la durée doit rester
-// sous 6 s. Mesuré dans les bancs complets du 2026-10-02 : à 4,5 s (1,5 s de marge de démarrage), machine
-// chargée, la mutation « réessai du message désactivé » restait verte ; à 6,5 s, le test non muté échouait
-// dès que le processus démarrait en moins de 0,4 s. À 5,5 s : 2,5 s de marge pour la mutation, et au moins
-// 0,6 s pour le test non muté.
-function verrouTenu(dir, ms) {
-  const verrou = path.join(dir, '.etat', `${PROJET}.claude.json.lock`);
-  fs.writeFileSync(verrou, '99999 autre session');
-  const t = new Date(Date.now() - (10000 - ms)); // périmé (10 s d'âge) dans `ms` millisecondes
-  fs.utimesSync(verrou, t, t);
-  return verrou;
+// Les 5,5 s courent depuis la PREMIÈRE tentative du processus testé (aide préchargée), pas depuis son
+// lancement : sans réessai l'échec tombe à 3 s, avec réessai le message abandonnerait vers 6,1 s
+// (DELAI_MESSAGE_MS = 6 s). Avant, le banc posait le verrou puis lançait le processus : sous forte charge
+// (2026-10-02 puis 2026-10-03, clone neuf), node démarrait après la fin du verrou et la mutation « réessai
+// du message désactivé » restait verte.
+const AIDE_VERROU = path.join(__dirname, 'verrou-au-premier-essai.js');
+function sousVerrou(dir, ms) {
+  return { node: ['--require', AIDE_VERROU], env: { AML_TEST_VERROU: path.join(dir, '.etat', `${PROJET}.claude.json.lock`), AML_TEST_VERROU_MS: String(ms) } };
 }
 
 test('verrou occupé plus de 3 s : la CLI et le message réessaient au lieu d\'échouer', () => {
   const dir = dossier('reessai-verrou');
   ups(dir, 'premier');
-  verrouTenu(dir, 5500);
-  const a = cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0001', 'Ligne sous charge']);
+  const a = cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0001', 'Ligne sous charge'], sousVerrou(dir, 5500));
   assert.equal(a.code, 0, 'la CLI doit réessayer : ' + a.err);
   assert.equal(etat(dir).lignes['C-0001'].texte, 'Ligne sous charge');
-  verrouTenu(dir, 5500);
-  const r = ups(dir, 'Message envoyé pendant que le verrou est tenu', { prompt_id: 'p-2' });
+  const r = ups(dir, 'Message envoyé pendant que le verrou est tenu', { prompt_id: 'p-2' }, sousVerrou(dir, 5500));
   const ctx = contexte(r);
   assert.match(ctx, /Nouveau message M-0002\. Avant d'agir/);
   assert.ok(!/n'a PAS pu être enregistré/.test(ctx), 'pas de secours quand un réessai suffit');
@@ -1379,9 +1534,63 @@ test('copie de secours en panne : l\'écriture principale réussit, la panne est
   });
 });
 
-test('mutation : copie de secours ou restauration désactivée -> banc rouge', { skip: EN_MUTATION }, () => {
-  const temoin = relancer(copie('temoin-secours'), 'copie de secours : chaque');
+// Constaté le 2026-10-07 : le dossier de la copie de secours (un disque lent) était relu à chaque événement de
+// hook, pour retrouver un projet effacé de la racine. Sa liste est gardée dans la racine ; le dossier n'est
+// relu que si elle manque (racine effacée), si elle vieillit, ou si le dossier de secours a changé.
+test('copie de secours : son dossier n\'est pas relu à chaque événement, sa liste est gardée dans la racine ; liste ou racine effacée, il est relu', () => {
+  const dir = dossier('secours-liste');
+  const secours = path.join(RUN, 'secours-liste-copie');
+  fs.rmSync(secours, { recursive: true, force: true });
+  const gardee = path.join(dir, '.secours-projets.claude.json');
+  const sansPrefixe = d => norm(String(d).replace(/^\\\\\?\\/, ''));
+  // Nombre de lectures du dossier de secours faites par le noyau, dans ce processus, pendant fn.
+  const lectures = fn => {
+    const origine = fs.readdirSync;
+    let n = 0;
+    fs.readdirSync = function (d, ...reste) { if (sansPrefixe(d) === norm(secours)) n++; return origine.call(this, d, ...reste); };
+    try { avecRacine(dir, fn); } finally { fs.readdirSync = origine; }
+    return n;
+  };
+  avecSecours(secours, () => {
+    ups(dir, 'Corrige le bouton de paiement');
+    assert.equal(cli(dir, ['ajouter', '--projet', PROJET, '--de', 'M-0001', 'Corriger le bouton']).code, 0);
+    // Sans liste gardée : le dossier est lu une fois ; ensuite plus du tout.
+    fs.rmSync(gardee, { force: true });
+    assert.equal(lectures(() => core.assurerVues('claude')), 1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(gardee, 'utf8')).projets, [PROJET]);
+    assert.equal(lectures(() => { core.assurerVues('claude'); core.assurerVues('claude'); core.listerProjetsTous('claude'); }), 0, 'liste gardée : aucune lecture du dossier de secours');
+    // Un projet qui entre dans la copie est ajouté à la liste gardée, sans relire le dossier.
+    ups(dir, 'Question hors projet', { cwd: 'C:\\travail\\autre-chose', session_id: 'sess-9', prompt_id: 'p-9' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(gardee, 'utf8')).projets, ['_general', PROJET]);
+    // État et journal supprimés par un script : retrouvés par la liste gardée, toujours sans relire le dossier.
+    fs.unlinkSync(path.join(dir, '.etat', `${PROJET}.claude.json`));
+    fs.unlinkSync(path.join(dir, `${PROJET}.claude.journal.log`));
+    assert.equal(lectures(() => core.assurerVues('claude')), 0);
+    assert.equal(etat(dir).lignes['C-0001'].texte, 'Corriger le bouton', 'ligne revenue depuis la copie de secours');
+    // Liste trop ancienne : le dossier est relu.
+    const c = JSON.parse(fs.readFileSync(gardee, 'utf8'));
+    fs.writeFileSync(gardee, JSON.stringify(Object.assign(c, { le: new Date(Date.now() - 11 * 60 * 1000).toISOString() })));
+    assert.equal(lectures(() => core.listerProjetsTous('claude')), 1);
+    assert.equal(lectures(() => core.listerProjetsTous('claude')), 0);
+  });
+  // Un autre dossier de secours : la liste gardée pour le premier ne vaut pas pour lui.
+  const autre = path.join(RUN, 'secours-liste-autre');
+  fs.mkdirSync(autre, { recursive: true });
+  avecSecours(autre, () => assert.deepEqual(avecRacine(dir, () => core.listerProjetsTous('claude')), ['_general', PROJET]));
+  assert.deepEqual(JSON.parse(fs.readFileSync(gardee, 'utf8')).projets, []);
+});
+
+test('mutation : copie de secours ou restauration désactivée, ou dossier de secours relu à chaque événement -> banc rouge', { skip: EN_MUTATION }, () => {
+  const temoin = relancer(copie('temoin-secours'), 'copie de secours : (chaque|son dossier)');
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
+  for (const [ancre, remplacement] of [
+    ['secours-liste-gardee', '  // MUTATION : dossier de secours relu à chaque événement'],
+    ['secours-liste-ajout', '    // MUTATION : un projet qui entre dans la copie n\'est pas ajouté à la liste gardée'],
+  ]) {
+    const r = relancer(copie('mutation-' + ancre, 'lib/context-ledger-core.js', 'ancre-mutation:' + ancre, remplacement), 'copie de secours : son dossier');
+    assert.notEqual(r.status, 0, `la mutation ${ancre} doit rendre un banc rouge :\n` + r.stdout);
+    assert.match(r.stdout, /not ok \d+ - copie de secours : son dossier/, ancre);
+  }
   const sansCopie = copie('mutation-secours-copie', 'lib/context-ledger-core.js', 'ancre-mutation:secours-copie', '  return; // MUTATION : copie de secours désactivée');
   const r1 = relancer(sansCopie, 'copie de secours : chaque');
   assert.notEqual(r1.status, 0, 'la mutation (copie) doit rendre un banc rouge :\n' + r1.stdout);
@@ -1754,6 +1963,10 @@ test('fiche de sous-agent : mission copiée mot pour mot au lancement, notes du 
   assert.match(consigne, /^Fichier contexte : tu es un sous-agent \(ligne C-0001 de l'orchestrateur\)\. Ta fiche : /);
   assert.ok(consigne.includes(index.fiche));
   assert.match(consigne, /Elle contient ta mission, mot pour mot\./);
+  // La mission prime sur la fiche : il la lit d'abord, et n'écrit rien dans sa fiche si elle l'interdit
+  // (constaté le 2026-10-07 : dix sous-agents arrêtés parce que la consigne leur avait fait écrire leur fiche
+  // alors que leur mission limitait l'écriture à un dossier).
+  assert.match(consigne, /\nLis d'abord ta mission\. Ta fiche est un carnet de suivi, hors de ton travail : une mission qui t'attribue des fichiers, ou qui t'interdit de modifier le dépôt \(lecture seule\), ne t'interdit pas d'y noter\. Mais si elle t'interdit expressément toute écriture ailleurs que dans ses livrables \(« n'écris nulle part ailleurs »\), elle prime : n'écris rien dans cette fiche, ni mission, ni note, ni signalement, et dis-le dans ton rapport\. Sinon, note dans ta fiche ton avancement et ce que tu trouves/);
   assert.match(consigne, /context-ledger\.js" note --fiche a1b2c3d4e5f6a7b8c "fait : /);
   assert.match(consigne, /elle ne se modifie pas : ajouter, etat, sans-travail et abandon lui sont réservés\./);
   // Il sait lire des lignes par leur identifiant et la liste d'un autre agent.
@@ -1846,12 +2059,19 @@ test('fiche de sous-agent : démarrage avant le retour de l\'outil de lancement,
   const ID3 = 'a0000000000000003';
   avecRacine(dir, () => core.creerFiche({ agent: 'claude', sessionId: SESSION_FICHE, id: ID3, projet: PROJET, titre: 'sans transcript', genre: 'worker' }));
   const c3 = avecRacine(dir, () => core.texteConsigneSousAgent({ agent: 'claude', id: ID3, script: HOOK }));
-  assert.match(c3, /Ta mission n'a pas pu y être copiée automatiquement : commence par la recopier mot pour mot avec `node ".+" note --fiche a0000000000000003 --genre mission "\.\.\."`/);
+  // Il lit sa mission d'abord : la recopie n'est plus le premier geste, et elle n'a pas lieu si la mission
+  // interdit d'écrire ailleurs que dans ses livrables.
+  assert.match(c3, /Ta fiche : .+\. Ta mission n'a pas pu y être copiée automatiquement\.\n/);
+  assert.match(c3, /\nLis d'abord ta mission\. Ta fiche est un carnet de suivi, hors de ton travail : .+ Mais si elle t'interdit expressément toute écriture ailleurs que dans ses livrables .+ elle prime : n'écris rien dans cette fiche, ni mission, ni note, ni signalement, et dis-le dans ton rapport\. Sinon, recopie ta mission mot pour mot avec `node ".+" note --fiche a0000000000000003 --genre mission "\.\.\."`, puis note dans ta fiche ton avancement/);
+  assert.ok(!/commence par la recopier/.test(c3));
   assert.ok(fs.readFileSync(indexFiche(dir, ID3).fiche, 'utf8').includes(core.MISSION_ABSENTE));
   const r3 = avecRacine(dir, () => core.texteRepriseSousAgent({ agent: 'claude', id: ID3, script: HOOK }));
   // « Redemande-la avant de continuer » n'a été suivi par aucun sous-agent ; le brief en fichier, si.
-  assert.match(r3, /Ta mission n'y a pas été copiée : reprends-la de ton brief en fichier si l'orchestrateur t'en a donné un \(sinon du résumé\), recopie-la dans ta fiche \(note --genre mission\), et dis dans ton rapport qu'elle a été reprise ainsi\./);
+  assert.match(r3, /Ta mission n'y a pas été copiée : reprends-la de ton brief en fichier si l'orchestrateur t'en a donné un \(sinon du résumé\) et dis dans ton rapport qu'elle a été reprise ainsi ; recopie-la dans ta fiche \(note --genre mission\) sauf si ta mission t'interdit expressément toute écriture ailleurs que dans ses livrables\./);
   assert.ok(!/redemande-la/.test(r3));
+  // La fiche rendue garde la même réserve, et dit qu'une tâche plus récente (une relance) remplace celle du lancement.
+  assert.match(r3, /pas le résumé de compactage\. Si l'orchestrateur t'a relancé depuis avec une nouvelle tâche, c'est cette tâche qui vaut\./);
+  assert.match(r3, /\nContinue à y noter ton avancement, sauf si ta mission t'interdit expressément toute écriture ailleurs que dans ses livrables : `node ".+" note --fiche a0000000000000003 "\.\.\."`\./);
   assert.equal(cli(dir, ['note', '--fiche', ID3, '--genre', 'mission', 'Relire les 35 rapports, ligne à ligne.']).code, 0);
   const t3 = fs.readFileSync(indexFiche(dir, ID3).fiche, 'utf8');
   assert.ok(t3.includes('## Mission (mot pour mot)\n\nRelire les 35 rapports, ligne à ligne.\n'));
@@ -2118,6 +2338,69 @@ test('capture de diagnostic : une ligne au début du hook, une à la fin ; un ho
   assert.deepEqual(lire('claude.jsonl').map(x => x.agent_id), ['a1']);
 });
 
+// Mesuré le 2026-10-07 avec cette capture : un agent donne au hook la commande seule ({ command: "texte" }),
+// sans dire quel shell la lancera. La capture garde la FORME de l'entrée d'un outil, jamais son contenu.
+test('capture de diagnostic : la forme de l\'entrée d\'un outil (champs, type de la commande, shell nommé), jamais son contenu', () => {
+  const tmp = path.join(RUN, 'capture-forme-tmp');
+  const capture = path.join(tmp, 'agent-memory-ledger', 'capture-hooks');
+  fs.mkdirSync(capture, { recursive: true });
+  fs.writeFileSync(path.join(capture, 'actif'), '');
+  const entrees = [
+    { tool_name: 'Bash', tool_input: { command: 'echo contenu-jamais-capture', description: 'contenu-jamais-capture' } },
+    { tool_name: 'Bash', tool_input: { command: ['C:\\Program Files\\PowerShell\\7\\pwsh.exe', '-NoProfile', '-Command', 'echo contenu-jamais-capture', 'contenu-jamais-capture'] } },
+    { tool_name: 'Bash', tool_input: { command: ['/usr/bin/bash', '-lc', 'echo contenu-jamais-capture'] } },
+    { tool_name: 'Bash', tool_input: { command: ['git', 'contenu-jamais-capture'] } },
+    { tool_name: 'exec_command', tool_input: { cmd: 'echo contenu-jamais-capture', shell: 'powershell', workdir: 'D:\\travail\\contenu-jamais-capture' } },
+    { tool_name: 'apply_patch', tool_input: '*** Begin Patch contenu-jamais-capture' },
+    { tool_name: 'Bash' },
+  ];
+  const code = `
+    const core = require(${JSON.stringify(CORE_PATH)});
+    for (const e of ${JSON.stringify(entrees)}) core.capturerEvenement({ agent: 'forme', input: Object.assign({ hook_event_name: 'PreToolUse' }, e), octets: 1 });`;
+  const env = Object.assign({}, process.env, { TEMP: tmp, TMP: tmp });
+  const r = spawnSync(process.execPath, ['-e', code], { env, encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(r.status, 0, r.stderr);
+  const brut = fs.readFileSync(path.join(capture, 'forme.jsonl'), 'utf8') + fs.readFileSync(path.join(capture, 'forme.debuts.jsonl'), 'utf8');
+  assert.ok(!brut.includes('contenu-jamais-capture'), 'aucun contenu capturé : ' + brut);
+  const fins = fs.readFileSync(path.join(capture, 'forme.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+  assert.deepEqual(fins.map(f => [f.outil_cles, f.outil_commande, f.outil_shell, f.outil_type]), [
+    [['command', 'description'], 'string', undefined, undefined],
+    [['command'], ['pwsh.exe', '-NoProfile', '-Command'], undefined, undefined],
+    [['command'], ['bash', '-lc'], undefined, undefined],
+    [['command'], ['git'], undefined, undefined],
+    [['cmd', 'shell', 'workdir'], 'string', 'powershell', undefined],
+    [undefined, undefined, undefined, 'string'],
+    [undefined, undefined, undefined, undefined],
+  ]);
+});
+
+// Constaté le 2026-10-07 : un hook de 21 s et un autre coupé à 30 s, node démarré en 41 ms dans les deux cas,
+// et rien dans la capture pour dire quelle étape avait attendu. La ligne de fin porte maintenant la durée de
+// chaque étape qui a pris du temps (attente d'un verrou, copie de secours, transcript, preuves).
+test('capture de diagnostic : la ligne de fin dit où le temps est passé (ici l\'attente d\'un verrou)', () => {
+  const dir = dossier('capture-jalons');
+  const tmp = path.join(RUN, 'capture-jalons-tmp');
+  const capture = path.join(tmp, 'agent-memory-ledger', 'capture-hooks');
+  fs.mkdirSync(capture, { recursive: true });
+  fs.writeFileSync(path.join(capture, 'actif'), '');
+  fs.mkdirSync(path.join(dir, '.sessions'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.sessions', 'claude-s-jalons.json.lock'), 'tenu');
+  // Le verrou de la session est tenu : le noyau l'attend jusqu'à l'échéance (0,8 s), puis renonce.
+  const code = `
+    const core = require(${JSON.stringify(CORE_PATH)});
+    core.capturerEvenement({ agent: 'claude', input: { hook_event_name: 'Stop', session_id: 's-jalons' }, octets: 1 });
+    core.fixerBudget(Math.round(process.uptime() * 1000) + 800);
+    try { core.modifierSession('claude', 's-jalons', x => { x.vu = 1; }); } catch (_) { /* verrou tenu jusqu'à l'échéance */ }`;
+  const env = Object.assign({}, process.env, { CONTEXT_LEDGER_DIR: dir, TEMP: tmp, TMP: tmp });
+  delete env.CONTEXT_LEDGER_BUDGET_MS;
+  const r = spawnSync(process.execPath, ['-e', code], { env, encoding: 'utf8', timeout: 60000, windowsHide: true });
+  assert.equal(r.status, 0, r.stderr);
+  const fin = JSON.parse(fs.readFileSync(path.join(capture, 'claude.jsonl'), 'utf8').trim());
+  assert.ok(fin.verrou_ms >= 500 && fin.verrou_ms <= fin.dur_ms, `attente du verrou mesurée : ${fin.verrou_ms} ms sur ${fin.dur_ms} ms`);
+  assert.equal(fin.secours_ms, undefined, 'une étape qui n\'a pris aucun temps n\'est pas écrite');
+  assert.equal(fin.transcript_ms, undefined);
+});
+
 // Constaté dans une session réelle : « Fichier contexte : rappel de fin de tour, hook timed out after 10s ».
 // Mesuré : le hook prend moins d'une seconde au repos ; sous forte charge, le démarrage de node et l'attente
 // d'un verrou occupé le font dépasser. Un hook tué ne rend rien : les attentes s'arrêtent donc à l'échéance.
@@ -2164,6 +2447,10 @@ test('mutation : fiches de sous-agents, lecture de la liste, signalements, budge
     ['fiche-compactage', '      // MUTATION : compactage du sous-agent jamais vu', /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
     ['fiche-annonce-par-evenement', '  // MUTATION : compactage annoncé par son événement ignoré', /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
     ['consigne-ne-devie-pas', "    '', // MUTATION : la consigne ne dit plus au sous-agent de s'en tenir à sa mission", /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    // La mission prime sur la fiche : réserve retirée de la consigne ou de la fiche rendue, relance oubliée.
+    ['consigne-reserve', "    'Note dans ta fiche ton avancement et ce que tu trouves : ' + commandeNote(script, index.id, '\"fait : ... ; reste : ... ; à inscrire : ...\"') + '.', // MUTATION : écriture de la fiche demandée même quand la mission l'interdit", /not ok \d+ - fiche de sous-agent : mission copiée/, NOYAU, FICHE],
+    ['reprise-reserve', "    'Continue à y noter ton avancement : ' + commandeNote(script, f.index.id, '\"...\"') + '. ' + NE_DEVIE_PAS + ' ' + texteLectureSeule(script, f.index.projet), // MUTATION : fiche rendue sans la réserve", /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
+    ['reprise-relance', "  const relance = ''; // MUTATION : la fiche rendue ne dit plus qu'une tâche plus récente remplace celle du lancement", /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
     ['reprise-sous-agent', '  // MUTATION : fiche jamais rendue au sous-agent', /not ok \d+ - fiche de sous-agent : mission copiée/, ADAPTATEUR, FICHE],
     ['consigne-filet', '  // MUTATION : consigne jamais donnée quand le démarrage du sous-agent n\'a pas été vu', /not ok \d+ - fiche de sous-agent : consigne donnée/, ADAPTATEUR, '^fiche de sous-agent : consigne'],
     ['fiche-reprise-unique', '  const rendre = trouve || !!annonce; // MUTATION : la fiche est rendue deux fois pour un même compactage', /not ok \d+ - compactage d.un sous-agent vu par SessionStart/, NOYAU, COMPACT],
@@ -2179,7 +2466,24 @@ test('mutation : fiches de sous-agents, lecture de la liste, signalements, budge
     // Consigne marquée mais absente du transcript du sous-agent.
     ['consigne-vue', '      vue = true; // MUTATION : toute ligne qui cite la consigne compte, brief compris', /not ok \d+ - fiche de sous-agent : consigne marquée/, NOYAU, '^fiche de sous-agent : consigne marquée'],
     ['consigne-redonnee', '      return false; // MUTATION : consigne absente du transcript jamais redonnée', /not ok \d+ - fiche de sous-agent : consigne marquée/, NOYAU, '^fiche de sous-agent : consigne marquée'],
-    ['capture-debut', '    // MUTATION : pas de ligne au début du hook', /not ok \d+ - capture de diagnostic/, NOYAU, '^capture de diagnostic'],
+    ['capture-debut', '    // MUTATION : pas de ligne au début du hook', /not ok \d+ - capture de diagnostic : une ligne/, NOYAU, '^capture de diagnostic'],
+    // Durée des étapes : jamais mesurée, ou absente de la ligne de fin.
+    ['jalons', '  return fn(); // MUTATION : durée des étapes jamais mesurée', /not ok \d+ - capture de diagnostic : la ligne de fin/, NOYAU, '^capture de diagnostic'],
+    ['capture-jalons', '      // MUTATION : durée des étapes absente de la ligne de fin', /not ok \d+ - capture de diagnostic : la ligne de fin/, NOYAU, '^capture de diagnostic'],
+    ['capture-forme-outil', '      ligne.outil_commande = c.map(x => chaine(x)); // MUTATION : la commande entière dans la capture', /not ok \d+ - capture de diagnostic : la forme/, NOYAU, '^capture de diagnostic'],
+    // Rapport d'un sous-agent dont le texte cite la liste : chaque condition de la forme prouvée.
+    ['texte-powershell', '    const texte = qui => ecritureDeTexteLitteral(cmd, dossier, qui); // MUTATION : écriture de texte reconnue sans preuve du shell', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['texte-hors-racine', '  if (cible === null) return false; // MUTATION : la cible de l\'écriture n\'est plus contrôlée', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['cible-affectee-une-fois', '  // MUTATION : une cible affectée plusieurs fois est acceptée', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['texte-reste-lecture', '  return true; // MUTATION : le reste de la commande n\'est plus jugé', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['texte-cible-complete', '  // MUTATION : chemin relatif, réseau ou lecteur de fournisseur accepté', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['texte-cible-nommee', '  // MUTATION : joker, variable, nom court ou flux accepté dans la cible', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['texte-cible-extension', '  // MUTATION : toute extension acceptée, script compris', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    ['texte-ambigu', '  // MUTATION : guillemet typographique accepté dans la cible ou les arguments de l\'écriture', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
+    // Ce que PowerShell lit autrement que la garde : accepté de nouveau dans une lecture, ou dans un appel de la CLI.
+    ['lecture-ambigue', '  // MUTATION : guillemet typographique et commentaire acceptés dans une lecture', /not ok \d+ - garde : sous-agent : ce que PowerShell lit autrement/, NOYAU, GARDE],
+    ['cli-ambigue', '  // MUTATION : guillemet typographique et commentaire acceptés dans un appel de la CLI', /not ok \d+ - garde : sous-agent : ce que PowerShell lit autrement/, NOYAU, GARDE],
+    ['texte-fermeture', '  const reFermeture = /\\n\'@/g; // MUTATION : fermeture du here-string lue en ASCII seulement', /not ok \d+ - garde : sous-agent : son rapport/, NOYAU, GARDE],
     // Titre de repli, mission absente, chercher par identifiant, aide, formes de lecture de la garde.
     ['fiche-titre', '      if (false) { // MUTATION : titre de repli jamais remplacé', /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
     ['reprise-sans-mission', "  const sansMission = f.index.mission ? '' : ' Ta mission n\\'y a pas été copiée : si le résumé ne te la rend pas mot pour mot, redemande-la à l\\'orchestrateur avant de continuer, puis recopie-la dans ta fiche (note --genre mission).'; // MUTATION : ancienne formulation", /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
@@ -2256,4 +2560,15 @@ test('mutation : livraisons non inscrites, fin non marquée, rappel retiré, rep
     assert.notEqual(r.status, 0, `la mutation ${ancre} doit rendre un banc rouge :\n` + r.stdout);
     assert.match(r.stdout, rouge, ancre);
   }
+});
+
+test('mutation : lignes du tour de nouveau rappelées en fin de tour -> banc rouge', { skip: EN_MUTATION }, () => {
+  const motif = 'ligne cr..e ou tenue . jour pendant le tour';
+  const temoin = relancer(copie('temoin-stop-lignes'), motif);
+  assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
+  const mutant = copie('mutation-stop-lignes', 'lib/context-ledger-core.js', 'ancre-mutation:stop-lignes-du-tour',
+    '  if (!aTrier.length && !trierIds(etat.lignes).some(id => etat.lignes[id].maj >= s.tourDebut && !TERMINAUX.includes(etat.lignes[id].statut))) return null; // MUTATION : lignes du tour de nouveau rappelées');
+  const r = relancer(mutant, motif);
+  assert.notEqual(r.status, 0, 'la mutation doit rendre un banc rouge :\n' + r.stdout);
+  assert.match(r.stdout, /not ok \d+ - fin de tour : une ligne cr..e ou tenue . jour pendant le tour/);
 });

@@ -30,7 +30,7 @@ const PLAFOND = 9000;
 const CONCURRENCE = { concurrency: 6 };
 
 // Les réglages de la personne qui lance les bancs ne doivent jamais fuir dans les tests.
-for (const k of ['CONTEXT_LEDGER_DIR', 'CONTEXT_LEDGER_SECOURS_DIR', 'CONTEXT_LEDGER_PREUVES_DIR', 'AGENT_MEMORY_LEDGER_HOME']) delete process.env[k];
+for (const k of ['CONTEXT_LEDGER_DIR', 'CONTEXT_LEDGER_SECOURS_DIR', 'CONTEXT_LEDGER_PREUVES_DIR', 'CONTEXT_LEDGER_SHELL', 'AGENT_MEMORY_LEDGER_HOME']) delete process.env[k];
 
 function norm(p) { return path.resolve(p).replace(/\\/g, '/').toLowerCase(); }
 
@@ -169,8 +169,9 @@ async function hookAsync(d, p, script = HOOK) {
   return { code: r.code, out: r.out };
 }
 
-async function cli(d, args, script = HOOK) {
-  return lancer([script, ...args], envPour(d), '', d);
+// plus : { node: options de node avant le script, env: variables propres à cet appel }.
+async function cli(d, args, script = HOOK, plus = null) {
+  return lancer([...(plus ? plus.node : []), script, ...args], Object.assign(envPour(d), plus ? plus.env : {}), '', d);
 }
 
 // Opérations du noyau en processus (préparation rapide), sur la racine du test.
@@ -226,7 +227,7 @@ async function preparer(d, texte = 'corrige le bug du formulaire', script = HOOK
 // ---------------------------------------------------------------------------
 // Bancs
 
-describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
+describe('adaptateur Codex', CONCURRENCE, () => {
   test('agent déduit de l\'emplacement du script : scripts/codex -> codex', async () => {
     const d = dossier('agent');
     await hook(d, payload('UserPromptSubmit', { prompt: 'message codex' }));
@@ -305,8 +306,12 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'SubagentStart');
     const c = ctx(r);
     assert.match(c, /^Fichier contexte : tu es un sous-agent \(ligne C-\d{4} de l'orchestrateur\)\. Ta fiche : /);
-    // Codex 0.155 : le message de lancement est chiffré, le hook ne peut pas copier la mission.
-    assert.match(c, /Ta mission n'a pas pu y être copiée automatiquement : commence par la recopier mot pour mot avec `node ".+context-ledger\.js" note --fiche ag-1 --genre mission "\.\.\."`/);
+    // Codex 0.155 : le message de lancement est chiffré, le hook ne peut pas copier la mission. Le sous-agent
+    // la lit d'abord ; il ne la recopie pas, et n'écrit rien dans sa fiche, si elle l'interdit (constaté le
+    // 2026-10-07 : dix sous-agents arrêtés pour avoir écrit leur fiche hors du dossier permis par leur mission).
+    assert.match(c, /Ta mission n'a pas pu y être copiée automatiquement\.\n/);
+    assert.match(c, /\nLis d'abord ta mission\. Ta fiche est un carnet de suivi, hors de ton travail : une mission qui t'attribue des fichiers, ou qui t'interdit de modifier le dépôt \(lecture seule\), ne t'interdit pas d'y noter\. Mais si elle t'interdit expressément toute écriture ailleurs que dans ses livrables \(« n'écris nulle part ailleurs »\), elle prime : n'écris rien dans cette fiche, ni mission, ni note, ni signalement, et dis-le dans ton rapport\. Sinon, recopie ta mission mot pour mot avec `node ".+context-ledger\.js" note --fiche ag-1 --genre mission "\.\.\."`, puis note dans ta fiche ton avancement/);
+    assert.ok(!/commence par la recopier/.test(c));
     assert.match(c, /\nTa mission est celle de ton lancement, rien d'autre : .+ ils ne te donnent aucun travail\.\n/);
     assert.match(c, /elle ne se modifie pas : ajouter, etat, sans-travail et abandon lui sont réservés\./);
     assert.match(c, /--genre deja-fait "C-NNNN : la preuve"/);
@@ -482,7 +487,7 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     assert.equal((await hook(d, payload('PostToolUse'))).out, '');
   });
 
-  test('Stop : stop_hook_active -> rien ; rappel decision:block une seule fois par message ; rien si cité', async () => {
+  test('Stop : stop_hook_active -> rien ; rappel decision:block une seule fois par message ; rien pour une ligne du tour, citée ou non', async () => {
     const d = dossier('stop');
     await hook(d, payload('UserPromptSubmit', { prompt: 'refais la page contact', turn_id: 't9' }));
     assert.equal((await hook(d, payload('Stop', { turn_id: 't9', stop_hook_active: true }))).out, '');
@@ -498,6 +503,14 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     const m = nouveauM(r2);
     const c = idDe((await cli(d, ['ajouter', '--projet', PROJET, '--de', m, 'ajoute un test'])).out, 'C');
     assert.equal((await hook(d, payload('Stop', { turn_id: 't10', last_assistant_message: `Reste ${c} : en cours.` }))).out, '');
+    // Constaté dans une conversation réelle de dépannage (2026-10-07) : la ligne était tenue à jour à chaque
+    // message, la réponse ne citait pas son identifiant, et le Stop bloquait 5 tours sur 7 ; Codex donnait
+    // une seconde réponse sans rien changer. Une ligne du tour non citée ne bloque plus la fin de tour.
+    const r3 = await hook(d, payload('UserPromptSubmit', { prompt: 'toujours rien', turn_id: 't11' }));
+    assert.equal((await cli(d, ['sans-travail', '--projet', PROJET, nouveauM(r3), 'retour sur le travail en cours'])).code, 0);
+    assert.equal((await cli(d, ['etat', '--projet', PROJET, c, 'en-cours', 'attend le résultat du contrôle'])).code, 0);
+    assert.equal((await hook(d, payload('Stop', { turn_id: 't11', last_assistant_message: 'Envoie-moi le résultat du contrôle.' }))).out, '', 'ligne tenue à jour pendant le tour, non citée : pas de blocage');
+    assert.equal(etat(d).lignes[c].note, 'attend le résultat du contrôle', 'la ligne reste dans la liste, avec sa note');
   });
 
   // Le Stop est le canal le plus sûr vers le modèle Codex.
@@ -540,14 +553,17 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     assert.equal(etat(d).lignes[c].statut, 'fait', 'elle l\'est à l\'événement suivant');
   });
 
+  // Les 7,5 s courent depuis la PREMIÈRE tentative de la CLI (aide préchargée), pas depuis son lancement. Posé
+  // par le banc puis libéré 7,5 s plus tard, le verrou s'usait pendant le démarrage de node : sous forte
+  // charge la CLI arrivait après sa fin, ne l'attendait plus, et la mutation « réessai désactivé » restait verte.
   test('CLI sous charge : verrou du fichier contexte tenu 7,5 s (> 3 s du noyau) -> ajouter réussit quand même', async () => {
     const d = dossier('cli-verrou');
     const a0 = await cli(d, ['ajouter', '--projet', PROJET, 'ligne témoin']);
     assert.equal(a0.code, 0, a0.err);
     const verrou = path.join(racineDe(d), '.etat', `${PROJET}.codex.json.lock`);
-    fs.writeFileSync(verrou, 'autre processus');
-    const liberer = new Promise(r => setTimeout(() => { try { fs.unlinkSync(verrou); } catch (_) { /* rien */ } r(); }, 7500));
-    const [a] = await Promise.all([cli(d, ['ajouter', '--projet', PROJET, 'ligne pendant le verrou']), liberer]);
+    const a = await cli(d, ['ajouter', '--projet', PROJET, 'ligne pendant le verrou'], HOOK, {
+      node: ['--require', path.join(__dirname, 'verrou-au-premier-essai.js')], env: { AML_TEST_VERROU: verrou, AML_TEST_VERROU_MS: '7500' },
+    });
     assert.equal(a.code, 0, `ajouter a échoué sous verrou : ${a.err}`);
     assert.ok(Object.values(etat(d).lignes).some(l => l.texte === 'ligne pendant le verrou'));
   });
@@ -600,6 +616,11 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     assert.ok(!fs.existsSync(path.join(racineDe(d), '.sessions', 'en-attente-codex.jsonl')), 'file d\'attente vidée');
   });
 
+  // Sous très forte charge, un hook peut épuiser ses 6 s de réessais : son message part en file d'attente et
+  // l'événement suivant l'enregistre. C'est le contrat (jamais perdu), et le banc le joue : il laisse passer
+  // l'événement suivant avant de compter, au lieu d'exiger que les dix aboutissent du premier coup. Constat du
+  // 2026-10-03, machine chargée : 1 message sur 10 n'était pas enregistré d'emblée, rien n'était perdu, et le
+  // banc était rouge à tort.
   test('concurrence : 10 processus en parallèle (deux sessions) -> 10 M distincts, aucun perdu', async () => {
     const d = dossier('concurrence');
     const jobs = [];
@@ -608,6 +629,9 @@ describe('adaptateurs Codex et Codex Home', CONCURRENCE, () => {
     }
     const res = await Promise.all(jobs);
     res.forEach(x => assert.equal(x.code, 0));
+    const enAttente = () => { try { return fs.readdirSync(path.join(racineDe(d), '.sessions')).some(n => n.startsWith('en-attente-codex.jsonl')); } catch (_) { return false; } };
+    for (let i = 0; i < 5 && enAttente(); i++) await hook(d, payload('PostToolUse'));
+    assert.ok(!enAttente(), 'les messages en attente sont enregistrés par les événements suivants');
     const ids = Object.keys(etat(d, 'codex').demandes);
     assert.equal(ids.length, 10);
     assert.equal(new Set(ids).size, 10);
@@ -1012,6 +1036,48 @@ describe('garde PreToolUse (Codex)', CONCURRENCE, () => {
     ]) assert.equal((await garde(cmd, sa)).out, '', `devait permettre : ${cmd}`);
   });
 
+  // Constat réel du 2026-10-07 : 6 écritures refusées chez 5 sous-agents qui écrivaient LEUR rapport, parce que
+  // son texte citait la liste ou la commande context-ledger. Les formes permises et les attaques sont jugées
+  // par le noyau (banc Claude Code) ; ici, ce que l'adaptateur décide. Codex donne au hook la commande seule
+  // ({ command: "texte" }, mesuré sur 1 483 commandes réelles) : le shell vient de la machine (PowerShell sous
+  // Windows, 4 718 exécutions mesurées sur 4 718) ou de CONTEXT_LEDGER_SHELL ; un appel qui nomme son shell prime.
+  test('garde : sous-agent : son rapport écrit par un here-string littéral qui cite la liste -> autorisé si le shell est PowerShell, deny sinon', async () => {
+    const d = dossier('garde-rapport');
+    const W = R(d).replace(/\//g, '\\');
+    const S = 'node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js"';
+    const RAPPORT = 'D:\\travail\\rapports\\controle-g03.md';
+    const TEXTE = `# Contrôle\n\n- Suivi : \`C-0352\` dans \`${W}\\projet-demo.claude\\C-0352.txt\`, l'état est bloqué.\n- Commande : \`${S} chercher --projet projet-demo C-0352\`.`;
+    const cmd = `$p='${RAPPORT}'; @'\n${TEXTE}\n'@ | Add-Content -LiteralPath $p -Encoding utf8`;
+    const sa = { agent_id: 'a1', agent_type: 'worker' };
+    const garde = (tool_name, tool_input, shell, qui = sa) => hook(d, payload('PreToolUse', Object.assign({ tool_name, tool_input }, qui)), HOOK, { CONTEXT_LEDGER_SHELL: shell });
+    const refuse = r => !!(r.json && r.json.hookSpecificOutput.permissionDecision === 'deny');
+    // Forme réelle : la commande seule. Le shell par défaut décide.
+    assert.equal((await garde('Bash', { command: cmd }, 'powershell')).out, '', 'PowerShell : le rapport s\'écrit');
+    assert.equal((await garde('Bash', { command: cmd }, 'pwsh')).out, '');
+    const rb = await garde('Bash', { command: cmd }, 'bash');
+    assert.ok(refuse(rb), 'bash : les mêmes caractères seraient du code');
+    assert.match(rb.json.hookSpecificOutput.permissionDecisionReason, /passe par l'outil de fichier \(apply_patch, Write\)/);
+    assert.equal(refuse(await garde('Bash', { command: cmd }, '')), process.platform !== 'win32', 'sans réglage : PowerShell sous Windows, un shell POSIX ailleurs');
+    // L'appel nomme son shell (commande en tableau, champ shell, mode code) : il prime sur le défaut.
+    assert.equal((await garde('Bash', { command: ['C:\\Program Files\\PowerShell\\7\\pwsh.exe', '-NoProfile', '-Command', cmd] }, 'bash')).out, '');
+    assert.ok(refuse(await garde('Bash', { command: ['bash', '-lc', cmd] }, 'powershell')));
+    assert.equal((await garde('exec_command', { cmd, shell: 'powershell' }, 'bash')).out, '');
+    assert.ok(refuse(await garde('exec_command', { cmd, shell: 'bash' }, 'powershell')));
+    const code = sh => `const r = await tools.exec_command({ cmd: ${JSON.stringify(cmd)}, shell: ${JSON.stringify(sh)} }); text(r.output);`;
+    assert.equal((await garde('exec', { code: code('powershell') }, 'bash')).out, '');
+    assert.ok(refuse(await garde('exec', { code: code('bash') }, 'powershell')));
+    // L'orchestrateur écrit de la même façon un fichier dont le texte cite la liste.
+    assert.equal((await garde('Bash', { command: cmd }, 'powershell', {})).out, '');
+    assert.ok(refuse(await garde('Bash', { command: cmd }, 'bash', {})));
+    // La racine reste fermée : cible dans la racine, ou reste de la commande qui y efface.
+    assert.ok(refuse(await garde('Bash', { command: `@'\n${TEXTE}\n'@ | Set-Content -LiteralPath '${W}\\projet-demo.claude.md'` }, 'powershell')));
+    assert.ok(refuse(await garde('Bash', { command: `${cmd}; Remove-Item -LiteralPath '${W}\\x.md'` }, 'powershell')));
+    // La voie prise par quatre sous-agents sur cinq après leur refus reste ouverte dans tous les shells : le
+    // patch, dont seul le chemin est jugé.
+    const patch = `*** Begin Patch\n*** Add File: verif/rapport.md\n+${TEXTE.split('\n').join('\n+')}\n*** End Patch`;
+    assert.equal((await garde('apply_patch', { command: patch }, 'bash')).out, '');
+  });
+
   test('garde : stdin illisible visant la racine -> deny conforme', async () => {
     const d = dossier('garde-illisible');
     const r = await hook(d, '{"hook_event_name":"PreToolUse","tool_input":{"command":"rm C:/Users/demo/.agent-memory-ledger/contexte/x.md"');
@@ -1094,6 +1160,9 @@ const MUTATIONS = [
   { nom: 'signalements-agents', motif: '^signalement entre agents', transformer: s => s.replace(/try \{ return core\.texteSuiviEnCours\([^\n]*\/\/ ancre-mutation:suivi-en-cours/, "return ''; // mutation") },
   { nom: 'consigne-transcript', motif: '^sous-agents : consigne marquée', transformer: s => s.replace(/fichier: input\.transcript_path, formes: \['"role":"developer"'\] \}\)\) contexte\(evenement/, "formes: ['\"role\":\"developer\"'] })) contexte(evenement") },
   { nom: 'stop-budget', motif: '^Stop Codex : budget', transformer: s => s.replace(/const sIlResteDuTemps = [^\n]*\/\/ ancre-mutation:stop-budget/, 'const sIlResteDuTemps = fn => { try { fn(); } catch (_) { /* mutation */ } };') },
+  // Shell des commandes : supposé PowerShell partout, ou shell nommé par l'appel ignoré.
+  { nom: 'shell-par-defaut', motif: '^garde : sous-agent : son rapport', transformer: s => s.replace(/return e \? RE_POWERSHELL\.test\(e\) : process\.platform === 'win32'; \/\/ ancre-mutation:shell-par-defaut/, 'return true; // mutation') },
+  { nom: 'shell-nomme', motif: '^garde : sous-agent : son rapport', transformer: s => s.replace(/const powershell = [^\n]*\/\/ ancre-mutation:shell-nomme/, 'const powershell = shellParDefautPowerShell(); // mutation') },
   { nom: 'reconciliateur', motif: 'preuve par contenu|réconciliateur|CRLF', transformer: s => s.replace(/const r = core\.reconcilier\(\{ agent: AGENT, base: basePreuves\(\) \}\);/, 'const r = { faits: [], partiels: [], ignores: [], projets: [] };') },
 ];
 

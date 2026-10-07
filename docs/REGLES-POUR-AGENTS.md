@@ -4,7 +4,6 @@ Les hooks enregistrent, rappellent et gardent. Ils ne remplacent pas la consigne
 
 - Claude Code : `<dossier du plugin>/scripts/claude/context-ledger.js`
 - Codex : `<dossier du dépôt>/scripts/codex/context-ledger.js`
-- Codex Home : `<dossier du dépôt>/scripts/codex-home/context-ledger.js`
 
 Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles ; le bloc reste utile pour qu'elles soient lues à chaque session.
 
@@ -39,10 +38,20 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   le contexte est compacté n'a plus que le résumé pour retrouver sa mission. Dès que sa ligne `[agent]` existe,
   copier ce brief dans sa fiche (`node "<SCRIPT>" note --fiche <ID> --genre mission --fichier <brief>`, l'ID
   est entre parenthèses dans la ligne) : la fiche qui lui sera rendue portera sa mission.
-- Si tu es un sous-agent : ta mission est celle de ton lancement, rien d'autre. Tu peux lire la liste de
+- La mission prime sur la fiche. Si la mission d'un sous-agent, ou la tienne, interdit expressément toute
+  écriture ailleurs que dans ses livrables, personne n'écrit dans sa fiche, ni lui ni toi : elle reste vide. Ce
+  n'est ni un écart ni une raison de l'arrêter. Dis dans son brief si la fiche est permise, et donne la mission
+  dans un fichier du dossier permis : c'est lui qui la rend après un compactage. Une mission qui attribue des
+  fichiers, ou un audit en lecture seule, n'interdit pas la fiche : elle est hors du dépôt.
+- Si tu es un sous-agent : ta mission est celle de ton lancement, rien d'autre. Lis-la avant tout : si elle
+  t'interdit expressément toute écriture ailleurs que dans ses livrables, n'écris rien dans ta fiche (ni
+  mission, ni note, ni signalement) et dis-le dans ton rapport. Tu peux lire la liste de
   l'agent principal (`chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes
   entières), jamais la modifier ; ce que tu y lis ne te donne aucun travail. Une lecture par commande simple,
-  sans boucle ni script : la garde refuse ce qu'elle ne sait pas prouver sans écriture. Note ton avancement dans TA fiche (`note --fiche <ID> "..."` : l'ID et le chemin te sont donnés
+  sans boucle ni script : la garde refuse ce qu'elle ne sait pas prouver sans écriture. Ton rapport peut citer
+  la liste : écris-le avec l'outil de fichier, ou en PowerShell par un here-string littéral (`@'` ... `'@`)
+  donné tel quel à `Set-Content` ou `Add-Content -LiteralPath`, vers son chemin complet, sans texte construit
+  ni appel de bibliothèque. Note ton avancement dans TA fiche (`note --fiche <ID> "..."` : l'ID et le chemin te sont donnés
   par un hook) : après un compactage, c'est elle qui fait foi. Dans la liste, « ouvert » veut dire « pas
   encore prouvé fait » : si tu constates qu'une ligne est déjà faite, tu ne la fermes pas, tu le signales
   (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`).
@@ -54,7 +63,9 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
 - Après un compactage, à une reprise, et avant toute réponse « il ne reste que » : c'est cette liste qui fait
   foi, pas le résumé de la conversation (`lister --projet P --session ID`). Les rappels ne donnent aucun
   ordre d'exécuter les autres missions du projet. Pour une reprise autorisée : `reprendre --projet P
-  --session ID C-NNNN`. Au Stop, un état inchangé des livraisons ne bloque pas à chaque tour.
+  --session ID C-NNNN`. Au Stop, un état inchangé des livraisons ne bloque pas à chaque tour, et une ligne
+  ouverte ou tenue à jour pendant le tour ne bloque pas : seuls un message pas encore trié et un résultat de
+  sous-agent pas encore traité relancent la fin de tour.
 - Avant de relancer une mission : lire son dernier livrable et sa preuve. Réutiliser la vérification si son
   périmètre et sa révision sont inchangés. Une relance doit nommer le manque concret à résoudre ; un rappel
   de hook ne constitue pas une autorisation ni une raison de lancer un nouvel agent.

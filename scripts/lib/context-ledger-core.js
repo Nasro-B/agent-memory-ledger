@@ -30,7 +30,9 @@
  *   .secours-etat.json                présent seulement quand la copie de secours est en panne
  * COPIE DE SECOURS (hors racine, facultative) : racineSecours() = %CONTEXT_LEDGER_SECOURS_DIR% ; sans cette
  *   variable, pas de copie. Chaque journal y est recopié à chaque écriture ; un journal principal perdu ou
- *   amputé est reconstruit depuis cette copie (texteJournal), racine entièrement effacée comprise.
+ *   amputé est reconstruit depuis cette copie (texteJournal), racine entièrement effacée comprise. La liste
+ *   de ses projets est gardée dans la racine (.secours-projets.<agent>.json) : son dossier, qui peut être
+ *   sur un disque lent, n'est relu que si cette liste manque ou a plus de dix minutes.
  * Intégrité : si le JSON manque, est illisible ou ne correspond plus à son empreinte, il est comparé au
  * journal rejoué ; toute ligne ou demande que le journal dit non faite et que le JSON a fait disparaître
  * (absente, statut « fait »/« abandon » sans événement, statut inconnu, texte modifié) est restaurée.
@@ -81,8 +83,8 @@
  *        -> {id, projet, doublon}   M-NNNN mot pour mot, dédoublonné par promptId, marque le début du tour
  *   secours({agent, sessionId, promptId, texte, erreur}) -> chemin   garde un message non enregistré
  *   contexteEchecMessage({agent, projet, script, erreur}) -> string  texte injecté dans ce cas
- *   rappelStop({agent, sessionId, promptId, dernierMessage, script}) -> texte|null
- *        un seul rappel par message humain : M du tour encore à trier, lignes C du tour ni faites ni citées
+ *   rappelStop({agent, sessionId, promptId, script}) -> texte|null
+ *        un seul rappel par message humain : les M du tour encore à trier, rien d'autre
  *   suiteTranscript({agent, sessionId, fichier, surLigne(Buffer)}) -> {vu, base}|null
  *        lignes complètes écrites dans le transcript depuis session.transcriptVu (premier passage : base)
  *
@@ -126,7 +128,12 @@
  *        (verrou, réessais) s'y arrêtent. %CONTEXT_LEDGER_BUDGET_MS% remplace la valeur (bancs).
  *   capturerEvenement({agent, input, octets})   forme et durée des événements reçus, sans aucun contenu ;
  *        actif seulement si le fichier « actif » existe dans le dossier de capture (voir DOSSIER_CAPTURE) ;
- *        une ligne courte au début (<agent>.debuts.jsonl) : un début sans fin = hook tué par son délai
+ *        une ligne courte au début (<agent>.debuts.jsonl) : un début sans fin = hook tué par son délai ;
+ *        la ligne de fin porte dur_ms et, pour chaque étape qui a pris du temps, sa durée : verrou_ms
+ *        (attente d'un verrou), secours_ms (disque de la copie de secours), transcript_ms, preuves_ms
+ *        (recherche des preuves, attente de son verrou comprise : ces durées ne s'additionnent pas) ;
+ *        pour un outil, la forme de son entrée : outil_cles, outil_commande (type, ou programme et options
+ *        d'une commande en tableau), outil_shell
  *
  * Preuves
  *   extraireMarqueurs(texte) -> [{id, partiel}]       [ctx C-0012], [ctx C-0012, C-0013], [ctx C-0012 partiel]
@@ -144,10 +151,14 @@
  *        précédent (le tout premier passage sert de base, sans rien appliquer)
  *
  * Garde
- *   gardeOutil({input, generique}) -> raison|null     raison de refus PreToolUse, null = autorisé
+ *   gardeOutil({input, generique, powershell}) -> raison|null     raison de refus PreToolUse, null = autorisé
  *        sous-agent (input.agent_id) : lecture de la racine permise, écriture refusée, CLI limitée à lister,
  *        chercher, fiche, help, et note sur sa propre fiche
+ *        powershell : la commande part à coup sûr dans PowerShell (sinon seuls les outils PowerShell le
+ *        prouvent) ; alors un texte littéral (here-string @' '@) écrit dans un fichier de texte hors de la
+ *        racine passe, même s'il cite la racine : le rapport d'un sous-agent
  *   texteToucheRacine(texte) -> bool ; appelleCli(texte) -> bool ; commandeLectureOuCli(cmd, sousAgent?) -> bool
+ *   lectureAmbigue(cmd) -> bool     guillemet typographique ou commentaire : PowerShell les lit autrement
  *   commandeViseRacine(cmd, cwd) -> bool     cwd dans la racine, ou chemin relatif (après cd / depuis cwd)
  *                                            qui y mène, jokers compris (cd <maison> && rm -rf contexte)
  *
@@ -180,7 +191,7 @@ const config = require('./config.js');
 
 const AGENTS = config.AGENTS;
 // Dossier de l'adaptateur (scripts/claude, scripts/codex) -> agent.
-const DOSSIERS_AGENTS = { claude: 'claude', codex: 'codex', 'codex-home': 'codex-home', '.codex-home': 'codex-home' };
+const DOSSIERS_AGENTS = { claude: 'claude', codex: 'codex' };
 const PLAFOND = 9000;
 const EXTRAIT_M = 300;
 const EXTRAIT_C = 400;
@@ -206,14 +217,17 @@ const SECTIONS = {
 };
 
 const RAISON_FICHIER = 'Le fichier contexte ne se modifie pas à la main : utilise la commande context-ledger (ajouter, etat, sans-travail, abandon). Une ligne ne disparaît que sur preuve [ctx].';
-const RAISON_SHELL = 'Sur la racine contexte, le shell ne sert qu\'à lire (cat, type, Get-Content, head, tail, grep, ls, dir) ou à appeler la commande context-ledger. ' + RAISON_FICHIER;
+// Ajouté aux refus d'une commande : comment écrire un fichier à soi dont le texte cite la racine (constat du
+// 2026-10-07 : le refus ne parlait que de lecture, trois sous-agents sur cinq ont écrit à l'orchestrateur).
+const AIDE_TEXTE = ' Si tu écrivais un fichier à toi (rapport, notes) dont le texte cite ce dossier ou cette commande : passe par l\'outil de fichier (apply_patch, Write), ou en PowerShell par un here-string littéral donné tel quel à l\'écriture, vers un chemin complet, le reste de la commande ne faisant que lire (@\'…\'@ | Set-Content -LiteralPath \'C:\\…\\rapport.md\').';
+const RAISON_SHELL = 'Sur la racine contexte, le shell ne sert qu\'à lire (cat, type, Get-Content, head, tail, grep, ls, dir) ou à appeler la commande context-ledger. ' + RAISON_FICHIER + AIDE_TEXTE;
 // Sous-agents (règle : « un sous-agent n'y écrit jamais »). Jusqu'au 2026-10-02 la garde leur
 // refusait aussi la LECTURE : mesuré cette nuit-là, 19 refus dans 7 sous-agents Codex et le même refus dans
 // 23 sous-agents Claude, tous pour lire le registre ou une fiche C (recouper un reste avec la liste).
 // Depuis : lecture permise, écriture toujours refusée, et une fiche par sous-agent pour ses propres notes.
 // Le 2026-10-02, 48 des 91 lectures encore refusées étaient des boucles sur des C-NNNN.txt : d'où « chercher »
 // par identifiant, et le rappel qu'une lecture se fait sans boucle ni script.
-const RAISON_SOUS_AGENT = 'Seul l\'orchestrateur écrit dans le fichier contexte. Toi, sous-agent, tu peux le LIRE, jamais le modifier : lis avec une commande simple, une par lecture, sans boucle ni script (Get-Content, cat, Select-String ou rg sur un fichier nommé ; Get-Content x | Select-Object -Index 10,20 pour des lignes précises) ou avec la commande context-ledger « chercher » (chercher C-0151 C-0152 rend ces lignes entières ; --agent claude ou --agent codex pour la liste d\'un autre agent) ; ajouter, etat, sans-travail et abandon sont réservés à l\'orchestrateur. Ce que tu trouves se note dans ta fiche (commande « note ») ou dans ton rapport : rends ton résultat à l\'orchestrateur, il mettra le fichier contexte à jour.';
+const RAISON_SOUS_AGENT = 'Seul l\'orchestrateur écrit dans le fichier contexte. Toi, sous-agent, tu peux le LIRE, jamais le modifier : lis avec une commande simple, une par lecture, sans boucle ni script (Get-Content, cat, Select-String ou rg sur un fichier nommé ; Get-Content x | Select-Object -Index 10,20 pour des lignes précises) ou avec la commande context-ledger « chercher » (chercher C-0151 C-0152 rend ces lignes entières ; --agent claude ou --agent codex pour la liste d\'un autre agent) ; ajouter, etat, sans-travail et abandon sont réservés à l\'orchestrateur. Ce que tu trouves se note dans ta fiche (commande « note ») ou dans ton rapport : rends ton résultat à l\'orchestrateur, il mettra le fichier contexte à jour.' + AIDE_TEXTE;
 // Sous-commandes de la CLI qu'un sous-agent peut appeler (lecture) ; « note » en plus, sur sa propre fiche.
 const CLI_SOUS_AGENT = new Set(['lister', 'chercher', 'fiche', 'help', '--help', '-h', 'aide']);
 
@@ -274,6 +288,19 @@ const MAX_SOUS_EXPRESSIONS = 8;
 // préparé par une commande précédente qui, elle, ne visait pas la racine.
 const PIPELINE_A_BLOC = new Set(['select-object', 'sort-object', 'format-table', 'format-list', 'measure-object']);
 const RE_CLI_SEGMENT = /^["']?(?:[^"'\s]*[\\/])?node(?:\.exe)?["']?\s+(?:"(?:[^"]*[\\/])?context-ledger\.js"|'(?:[^']*[\\/])?context-ledger\.js'|(?:[^"'\s]*[\\/])?context-ledger\.js)(?=\s|$)/i;
+// Écriture d'un texte littéral hors de la racine (voir ecritureDeTexteLitteral). Outils dont la commande part
+// à coup sûr dans PowerShell ; marque qui remplace le here-string pendant l'analyse (caractère 2, refusé dans
+// une commande) ; cmdlets d'écriture reconnues ; extensions d'un fichier de texte (un rapport, pas un script) ;
+// garde-fou courant avant d'écrire, qui ne fait qu'arrêter la commande.
+const OUTILS_POWERSHELL = ['PowerShell', 'mcp__Windows-MCP__PowerShell'];
+const MARQUE_TEXTE = String.fromCharCode(2);
+const RE_CMDLET_ECRITURE = /^(?:set-content|add-content|out-file)(?=\s|$)/i;
+const RE_EXTENSION_TEXTE = /\.(?:md|markdown|txt|json|jsonl|csv|tsv|log|ya?ml)$/i;
+const RE_GUILLEMET_TYPOGRAPHIQUE = /[‘’‚‛“”„]/;
+const RE_APOSTROPHE_TYPOGRAPHIQUE = /[‘’‚‛]/;
+const RE_GUILLEMET_DOUBLE_TYPOGRAPHIQUE = /[“”„]/;
+const TEST_CHEMIN = 'test-path\\s+(?:-(?:literal)?path\\s+)?(?:\\$[A-Za-z_]\\w*|\'[^\']*\')(?:\\s+-pathtype\\s+(?:leaf|container|any))?';
+const RE_GARDE_FOU = new RegExp(`^if\\s*\\(\\s*(?:(?:-not|!)\\s*\\(\\s*${TEST_CHEMIN}\\s*\\)|${TEST_CHEMIN})\\s*\\)\\s*\\{\\s*throw\\s+(?:'[^']*'|"[^"$\`]*")\\s*\\}$`, 'i');
 
 // ---------------------------------------------------------------------------
 // Utilitaires bas niveau
@@ -350,30 +377,42 @@ function fixerBudget(ms) {
 }
 function tempsRestant() { return echeance - Date.now(); }
 
+// Où passe le temps d'un hook : attente d'un verrou, disque de la copie de secours, lecture du transcript,
+// recherche des preuves. Ces durées vont dans la ligne de fin de la capture de diagnostic (des durées, aucun
+// contenu). Constaté le 2026-10-07 : un hook de 21 s et un autre coupé à 30 s, node démarré en 41 ms dans les
+// deux cas, et rien pour dire quelle étape avait attendu.
+const jalons = { verrou_ms: 0, secours_ms: 0, transcript_ms: 0, preuves_ms: 0 };
+function chronometrer(cle, fn) {
+  const t = Date.now();
+  try { return fn(); } finally { jalons[cle] += Date.now() - t; } // ancre-mutation:jalons
+}
+
 // Verrou exclusif : fs.openSync(<fichier>.lock, 'wx'), réessais courts jusqu'à 3 s,
 // verrou périmé (processus mort) au-delà de 10 s.
 function avecVerrou(fichier, fn) {
   const verrou = fichier + '.lock';
   fs.mkdirSync(lp(path.dirname(verrou)), { recursive: true });
   const limite = Math.min(Date.now() + DELAI_VERROU_MS, echeance); // ancre-mutation:echeance-verrou
-  for (;;) {
-    try {
-      const fd = fs.openSync(lp(verrou), 'wx');
-      try { fs.writeSync(fd, `${process.pid} ${maintenantIso()}`); } finally { fs.closeSync(fd); }
-      break;
-    } catch (e) {
-      if (e.code !== 'EEXIST' && !TRANSITOIRES.has(e.code)) throw e;
-      if (Date.now() > limite) throw new Error(`verrou occupé : ${verrou}`);
+  chronometrer('verrou_ms', () => {
+    for (;;) {
       try {
-        const st = fs.statSync(lp(verrou));
-        if (Date.now() - st.mtimeMs > VERROU_PERIME_MS) {
-          try { fs.unlinkSync(lp(verrou)); } catch (_) { /* un autre l'a déjà retiré */ }
-          continue;
-        }
-      } catch (_) { /* disparu entre-temps : réessayer */ }
-      dormir(10 + Math.floor(Math.random() * 30));
+        const fd = fs.openSync(lp(verrou), 'wx');
+        try { fs.writeSync(fd, `${process.pid} ${maintenantIso()}`); } finally { fs.closeSync(fd); }
+        break;
+      } catch (e) {
+        if (e.code !== 'EEXIST' && !TRANSITOIRES.has(e.code)) throw e;
+        if (Date.now() > limite) throw new Error(`verrou occupé : ${verrou}`);
+        try {
+          const st = fs.statSync(lp(verrou));
+          if (Date.now() - st.mtimeMs > VERROU_PERIME_MS) {
+            try { fs.unlinkSync(lp(verrou)); } catch (_) { /* un autre l'a déjà retiré */ }
+            continue;
+          }
+        } catch (_) { /* disparu entre-temps : réessayer */ }
+        dormir(10 + Math.floor(Math.random() * 30));
+      }
     }
-  }
+  });
   try { return fn(); } finally {
     try { fs.unlinkSync(lp(verrou)); } catch (_) { /* rien */ }
   }
@@ -445,8 +484,46 @@ function listerProjetsTous(agent) {
     .filter(n => n.endsWith(suffixe) && n.length > suffixe.length)
     .map(n => n.slice(0, -suffixe.length))
     .filter(p => { try { validerProjet(p); return true; } catch (_) { return false; } });
+  return [...new Set(listerProjets(agent).concat(noms(racine()), projetsDuSecours(agent, noms)))].sort();
+}
+
+// Projets présents dans la copie de secours. Ce dossier peut être sur un disque lent ou en veille : relu à
+// chaque événement (c'était le cas jusqu'au 2026-10-07), il fait attendre le hook le temps que ce disque
+// réponde. Sa liste est donc gardée dans la racine et relue au plus toutes les FRAICHEUR_SECOURS_MS ; une
+// écriture de la copie y ajoute son projet. Racine effacée : la liste gardée disparaît avec elle, le dossier
+// de secours est relu aussitôt et tout est reconstruit au premier événement, comme avant.
+const FRAICHEUR_SECOURS_MS = 10 * 60 * 1000;
+function fichierProjetsSecours(agent) { return path.join(racine(), `.secours-projets.${agent}.json`); }
+
+function projetsSecoursGardes(agent, secours) {
+  try {
+    const c = JSON.parse(sansBom(lireTexte(fichierProjetsSecours(agent)) || ''));
+    const age = Date.now() - Date.parse(c.le);
+    if (c.dossier === secours && Array.isArray(c.projets) && age >= 0 && age < FRAICHEUR_SECOURS_MS) return c.projets;
+  } catch (_) { /* absente ou illisible : le dossier de secours sera relu */ }
+  return null;
+}
+
+function projetsDuSecours(agent, noms) {
   const secours = racineSecours();
-  return [...new Set(listerProjets(agent).concat(noms(racine()), secours ? noms(secours) : []))].sort();
+  if (!secours) return [];
+  const gardes = projetsSecoursGardes(agent, secours);
+  if (gardes) return gardes; // ancre-mutation:secours-liste-gardee
+  const projets = chronometrer('secours_ms', () => noms(secours));
+  try { ecrireAtomique(fichierProjetsSecours(agent), JSON.stringify({ le: maintenantIso(), dossier: secours, projets }) + '\n'); } catch (_) { /* relue au prochain événement */ }
+  return projets;
+}
+
+// Une écriture de la copie y fait entrer son projet : la liste gardée le reçoit sans relire le dossier.
+function ajouterProjetSecours(agent, projet) {
+  const secours = racineSecours();
+  const gardes = secours ? projetsSecoursGardes(agent, secours) : null;
+  if (!gardes || gardes.includes(projet)) return;
+  try {
+    const c = JSON.parse(sansBom(lireTexte(fichierProjetsSecours(agent))));
+    c.projets = gardes.concat(projet).sort();
+    ecrireAtomique(fichierProjetsSecours(agent), JSON.stringify(c) + '\n'); // ancre-mutation:secours-liste-ajout
+  } catch (_) { /* la liste sera relue du dossier à son échéance */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,15 +578,18 @@ function synchroniserSecours(projet, agent, bloc) {
   try {
     const principal = chemins(projet, agent).journal;
     const tp = tailleDe(principal);
-    const ts = tailleDe(s);
-    fs.mkdirSync(lp(path.dirname(s)), { recursive: true });
-    if (ts >= 0 && ts + Buffer.byteLength(bloc) === tp) fs.appendFileSync(lp(s), bloc);
-    else if (ts > tp) lireJournal(projet, agent);
-    else {
-      const tmp = `${s}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-      fs.copyFileSync(lp(principal), lp(tmp));
-      fs.renameSync(lp(tmp), lp(s));
-    }
+    chronometrer('secours_ms', () => {
+      const ts = tailleDe(s);
+      fs.mkdirSync(lp(path.dirname(s)), { recursive: true });
+      if (ts >= 0 && ts + Buffer.byteLength(bloc) === tp) fs.appendFileSync(lp(s), bloc);
+      else if (ts > tp) lireJournal(projet, agent);
+      else {
+        const tmp = `${s}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+        fs.copyFileSync(lp(principal), lp(tmp));
+        fs.renameSync(lp(tmp), lp(s));
+      }
+    });
+    ajouterProjetSecours(agent, projet);
     noterSecours(true);
   } catch (e) { noterSecours(false, e && e.message ? e.message : String(e)); }
 }
@@ -525,7 +605,7 @@ function texteJournal(projet, agent) {
   const s = journalSecours(projet, agent);
   if (!s) return t;
   let ts = null;
-  try { ts = lireTexte(s); } catch (_) { ts = null; }
+  try { ts = chronometrer('secours_ms', () => lireTexte(s)); } catch (_) { ts = null; }
   if (ts === null || ts === t) return t;
   const principales = lignesJournal(t);
   const copie = lignesJournal(ts);
@@ -1122,19 +1202,20 @@ function contexteEchecMessage({ agent, projet, script, erreur, fichierSecours, s
   ].filter(Boolean).join('\n'), [], '', cmd.lister);
 }
 
-function rappelStop({ agent, sessionId, promptId, dernierMessage, script }) {
+// Fin de tour : un seul rappel par message humain, pour les messages de CE tour encore à trier.
+// Jusqu'au 2026-10-07, les lignes créées ou modifiées pendant le tour et absentes de la réponse étaient
+// rappelées aussi. Constaté dans des sessions réelles : ce rappel revenait à presque chaque tour (5 tours
+// sur 7 dans une conversation de dépannage), l'agent donnait une seconde réponse sans rien changer, et le
+// critère (l'identifiant écrit dans la réponse) ne disait rien du travail. Retiré : la ligne reste dans la
+// liste, qui fait foi et qui est réinjectée.
+function rappelStop({ agent, sessionId, promptId, script }) {
   const s = lireSession(agent, sessionId);
   if (!s || !s.projet) return null;
   const cle = s.promptCourant || promptId || s.tourDebut;
   if (!cle || (s.rappels || []).includes(cle)) return null;
   const etat = etatDeSession(lireLedger(s.projet, agent), agent, sessionId);
-  const msg = chaine(dernierMessage);
   const aTrier = (s.tourMessages || []).filter(id => etat.demandes[id] && etat.demandes[id].statut === 'a-trier');
-  const lignesTour = s.tourDebut ? trierIds(etat.lignes).filter(id => {
-    const l = etat.lignes[id];
-    return l.maj && l.maj >= s.tourDebut && !TERMINAUX.includes(l.statut) && !msg.includes(id);
-  }) : [];
-  if (!aTrier.length && !lignesTour.length) return null;
+  if (!aTrier.length) return null; // ancre-mutation:stop-lignes-du-tour
   const deja = modifierSession(agent, sessionId, x => {
     x.rappels = Array.isArray(x.rappels) ? x.rappels : [];
     if (x.rappels.includes(cle)) return true;
@@ -1147,14 +1228,10 @@ function rappelStop({ agent, sessionId, promptId, dernierMessage, script }) {
   const borner = items => (items.length > MAX_IDS_RAPPEL
     ? `${items.slice(0, MAX_IDS_RAPPEL).join(', ')} et ${items.length - MAX_IDS_RAPPEL} autre(s) (liste complète : \`${cmd.lister}\`)`
     : items.join(', '));
-  const parts = [`Fichier contexte (projet ${s.projet}) : fin de tour.`];
-  if (aTrier.length) {
-    parts.push(`Message(s) de l'utilisateur encore à trier : ${borner(aTrier)}. Transforme-le(s) avec \`${cmd.ajouter(aTrier[0])}\` ou classe-le(s) avec \`${cmd.sansTravail(aTrier[0])}\`.`);
-  }
-  if (lignesTour.length) {
-    const detail = borner(lignesTour.map(id => `${id} (${etat.lignes[id].statut})`));
-    parts.push(`Lignes créées ou modifiées pendant ce tour, ni faites ni citées dans ta réponse : ${detail}. Si c'est fait : cite [ctx C-NNNN] dans l'historique ou le commit ; sinon mets l'état à jour avec \`${cmd.etat}\` et dis à l'utilisateur ce qui reste.`);
-  }
+  const parts = [
+    `Fichier contexte (projet ${s.projet}) : fin de tour.`,
+    `Message(s) de l'utilisateur encore à trier : ${borner(aTrier)}. Transforme-le(s) avec \`${cmd.ajouter(aTrier[0])}\` ou classe-le(s) avec \`${cmd.sansTravail(aTrier[0])}\`.`,
+  ];
   return composerContexte(parts.join('\n'), [], '', cmd.lister);
 }
 
@@ -1162,6 +1239,10 @@ function rappelStop({ agent, sessionId, promptId, dernierMessage, script }) {
 // chaque ligne COMPLÈTE. Retourne l'octet qui suit la dernière ligne complète : une ligne en cours
 // d'écriture sera relue au passage suivant.
 function lireLignesDepuis(fichier, depuis, jusqua, surLigne) {
+  return chronometrer('transcript_ms', () => lireLignesChronometrees(fichier, depuis, jusqua, surLigne));
+}
+
+function lireLignesChronometrees(fichier, depuis, jusqua, surLigne) {
   let fin = depuis;
   const fd = fs.openSync(lp(fichier), 'r');
   try {
@@ -1811,17 +1892,26 @@ function texteLectureSeule(script, projet) {
 // qu'il lit dans sa liste ne lui donne aucun travail.
 const NE_DEVIE_PAS = 'Ta mission est celle de ton lancement, rien d\'autre : les messages de l\'utilisateur, les « À trier » et les lignes ouvertes que tu as pu hériter de l\'orchestrateur ou lire dans sa liste s\'adressent à lui, ils ne te donnent aucun travail.';
 
+// La mission prime sur la fiche. Constaté le 2026-10-07 dans Codex : dix sous-agents avaient pour mission de
+// n'écrire que dans un dossier ; la consigne (« commence par la recopier ») leur a fait écrire leur mission
+// dans leur fiche avant même de lire leur brief, deux l'ont signalé comme une écriture hors périmètre et
+// l'orchestrateur a arrêté les dix. Depuis : lire la mission d'abord, et ne rien écrire dans la fiche quand
+// elle interdit expressément toute écriture ailleurs (la fiche reste alors vide, le sous-agent le dit dans
+// son rapport). Une mission qui attribue des fichiers ou qui interdit de modifier le dépôt (audit en lecture
+// seule) n'interdit pas la fiche : sans cette précision, presque aucun sous-agent n'y noterait plus rien.
+const RESERVE_FICHE = 'Lis d\'abord ta mission. Ta fiche est un carnet de suivi, hors de ton travail : une mission qui t\'attribue des fichiers, ou qui t\'interdit de modifier le dépôt (lecture seule), ne t\'interdit pas d\'y noter. Mais si elle t\'interdit expressément toute écriture ailleurs que dans ses livrables (« n\'écris nulle part ailleurs »), elle prime : n\'écris rien dans cette fiche, ni mission, ni note, ni signalement, et dis-le dans ton rapport.';
+const SAUF_INTERDIT = 'sauf si ta mission t\'interdit expressément toute écriture ailleurs que dans ses livrables';
+
 // Consigne donnée au sous-agent à son démarrage.
 function texteConsigneSousAgent({ agent, id, script }) {
   const index = lireIndexFiche(agent, id);
   if (!index) return `Fichier contexte : tu es un sous-agent. ${NE_DEVIE_PAS} ${texteLectureSeule(script, null)} Rends ton résultat à l'orchestrateur, il mettra la liste à jour.`;
-  const mission = index.mission
-    ? 'Elle contient ta mission, mot pour mot.'
-    : `Ta mission n'a pas pu y être copiée automatiquement : commence par la recopier mot pour mot avec \`${commandeNote(script, index.id, '--genre mission "..."')}\`.`;
+  const mission = index.mission ? 'Elle contient ta mission, mot pour mot.' : 'Ta mission n\'a pas pu y être copiée automatiquement.';
+  const recopier = index.mission ? '' : ` recopie ta mission mot pour mot avec \`${commandeNote(script, index.id, '--genre mission "..."')}\`, puis`;
   return [
     `Fichier contexte : tu es un sous-agent${index.ligne ? ` (ligne ${index.ligne} de l'orchestrateur)` : ''}. Ta fiche : ${index.fiche}. ${mission}`,
     NE_DEVIE_PAS, // ancre-mutation:consigne-ne-devie-pas
-    `Note dans ta fiche ton avancement et ce que tu trouves, au fil du travail, pour ne rien perdre si ton contexte est compacté : \`${commandeNote(script, index.id, '"fait : ... ; reste : ... ; à inscrire : ..."')}\`. Après un compactage, c'est ta fiche qui fait foi, pas le résumé.`,
+    `${RESERVE_FICHE} Sinon,${recopier} note dans ta fiche ton avancement et ce que tu trouves, au fil du travail, pour ne rien perdre si ton contexte est compacté : \`${commandeNote(script, index.id, '"fait : ... ; reste : ... ; à inscrire : ..."')}\`. Après un compactage, c'est ta fiche qui fait foi, pas le résumé.`, // ancre-mutation:consigne-reserve
     `${texteLectureSeule(script, index.projet)} Dans cette liste, ${OUVERT_NEST_PAS_PAS_FAIT} Si tu constates qu'une ligne est déjà faite, tu ne la fermes pas : signale-le avec \`${commandeNote(script, index.id, '--genre deja-fait "C-NNNN : la preuve"')}\`, l'orchestrateur vérifiera. Même commande avec --genre bloque ou --genre question quand tu attends quelque chose de lui.`,
   ].join('\n');
 }
@@ -1899,11 +1989,15 @@ function texteRepriseSousAgent({ agent, id, script }) {
   const coupe = m !== mission || n !== notes;
   // Mission absente (Codex la chiffre) : la reprendre du brief en fichier quand l'orchestrateur en a donné un,
   // et le dire dans le rapport. « Redemande-la avant de continuer » n'a été suivi par aucun sous-agent.
-  const sansMission = f.index.mission ? '' : ' Ta mission n\'y a pas été copiée : reprends-la de ton brief en fichier si l\'orchestrateur t\'en a donné un (sinon du résumé), recopie-la dans ta fiche (note --genre mission), et dis dans ton rapport qu\'elle a été reprise ainsi.'; // ancre-mutation:reprise-sans-mission
+  // Même réserve qu'au démarrage : rien ne s'écrit dans la fiche quand la mission l'interdit.
+  const sansMission = f.index.mission ? '' : ` Ta mission n'y a pas été copiée : reprends-la de ton brief en fichier si l'orchestrateur t'en a donné un (sinon du résumé) et dis dans ton rapport qu'elle a été reprise ainsi ; recopie-la dans ta fiche (note --genre mission) ${SAUF_INTERDIT}.`; // ancre-mutation:reprise-sans-mission
+  // La fiche porte la mission du lancement. Constaté le 2026-10-07 : des sous-agents relancés deux fois
+  // recevaient après chaque compactage la mission du premier lancement, avec un nom de livrable périmé.
+  const relance = ' Si l\'orchestrateur t\'a relancé depuis avec une nouvelle tâche, c\'est cette tâche qui vaut.'; // ancre-mutation:reprise-relance
   return [
-    `Fichier contexte : ton contexte de sous-agent vient d'être compacté. Voici ta fiche (${f.index.fiche}) : c'est elle qui fait foi pour ta mission et ton avancement, pas le résumé de compactage.${coupe ? ' Elle est coupée ici : relis le fichier entier avant de continuer.' : ''}${sansMission}`,
+    `Fichier contexte : ton contexte de sous-agent vient d'être compacté. Voici ta fiche (${f.index.fiche}) : c'est elle qui fait foi pour ta mission et ton avancement, pas le résumé de compactage.${relance}${coupe ? ' Elle est coupée ici : relis le fichier entier avant de continuer.' : ''}${sansMission}`,
     entete, m, n,
-    `Continue à y noter ton avancement : \`${commandeNote(script, f.index.id, '"..."')}\`. ${NE_DEVIE_PAS} ${texteLectureSeule(script, f.index.projet)}`,
+    `Continue à y noter ton avancement, ${SAUF_INTERDIT} : \`${commandeNote(script, f.index.id, '"..."')}\`. ${NE_DEVIE_PAS} ${texteLectureSeule(script, f.index.projet)}`, // ancre-mutation:reprise-reserve
   ].filter(Boolean).join('\n\n');
 }
 
@@ -2160,6 +2254,10 @@ function listerFichiersPreuve(base) {
 function hashCourt(t) { return crypto.createHash('sha1').update(t).digest('hex').slice(0, 16); }
 
 function reconcilier({ agent, base }) {
+  return chronometrer('preuves_ms', () => reconcilierChronometre({ agent, base }));
+}
+
+function reconcilierChronometre({ agent, base }) {
   validerAgent(agent);
   const b = base || config.maison();
   const fEtat = path.join(racine(), `.reconciliation-${agent}.json`);
@@ -2373,6 +2471,33 @@ function masquerChaines(c) {
   return masque.join('');
 }
 
+// Ce que PowerShell lit autrement que masquerChaines (vérifié avec son analyseur, version 7.6, sans rien
+// exécuter) : un guillemet typographique ouvre et ferme une chaîne comme son équivalent droit, et un commentaire
+// peut porter une apostrophe qui, ici, ouvrirait une chaîne et cacherait la ligne suivante. Vrai si la commande
+// porte l'une de ces formes. Tolérés, parce que sans effet dans les deux lectures : l'apostrophe typographique
+// dans une chaîne entre guillemets doubles (le texte français d'une note), le guillemet double typographique
+// dans une chaîne simple.
+function lectureAmbigue(c) {
+  let guillemet = '';
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i];
+    if (!guillemet) {
+      if (ch === '"' || ch === '\'') guillemet = ch;
+      else if (ch === '#' || RE_GUILLEMET_TYPOGRAPHIQUE.test(ch)) return true;
+      continue;
+    }
+    if (ch === guillemet) {
+      if (guillemet === '\'' && c[i + 1] === '\'') { i++; continue; }
+      let barres = 0;
+      for (let j = i - 1; j >= 0 && c[j] === '\\'; j--) barres++;
+      if (!(guillemet === '"' && (barres % 2 === 1 || c[i - 1] === '`'))) guillemet = '';
+      continue;
+    }
+    if (guillemet === '\'' ? RE_APOSTROPHE_TYPOGRAPHIQUE.test(ch) : RE_GUILLEMET_DOUBLE_TYPOGRAPHIQUE.test(ch)) return true;
+  }
+  return false;
+}
+
 // Sous-expressions dont le contenu est une lecture, de l'intérieur vers l'extérieur : remplacées par la marque
 // dans la commande et dans son masque. Une parenthèse collée à ce qui la précède (nom de méthode ou de
 // fonction, point, $, &) n'est jamais remplacée.
@@ -2412,6 +2537,7 @@ function segmentsDe(c) {
 function cliSeuleDuSousAgent(cmd, agentId) {
   const c = chaine(cmd);
   if (/\$\(|`/.test(c)) return false;
+  if (lectureAmbigue(c)) return false; // ancre-mutation:cli-ambigue
   const appels = segmentsDe(c).map(s => s.replace(/^[&\s]+/, '')).filter(s => appelleCli(s));
   return appels.length > 0 && appels.every(s => RE_CLI_SEGMENT.test(s) && cliPermiseAuSousAgent(s, agentId));
 }
@@ -2423,6 +2549,7 @@ function commandeLectureOuCli(cmd, sousAgent, profondeur) {
   let c = chaine(cmd);
   if (/\$\(|`/.test(c)) return false; // substitution de commande : pas analysable, refus
   if (!niveau && c.includes(MARQUE_SOUS_EXPRESSION)) return false;
+  if (!niveau && lectureAmbigue(c)) return false; // ancre-mutation:lecture-ambigue
   // Blocs sans effet ({ $_.Line }, format, filtre) neutralisés à longueur égale : les positions restent valables.
   let masque = masquerChaines(c).replace(RE_BLOC_SUR, x => ' '.repeat(x.length)); // ancre-mutation:blocs-surs
   ({ c, masque } = marquerSousExpressions(c, masque, sousAgent, niveau));
@@ -2454,7 +2581,191 @@ function commandeLectureOuCli(cmd, sousAgent, profondeur) {
   return true;
 }
 
-function gardeOutil({ input, generique }) {
+// ---------------------------------------------------------------------------
+// Écriture d'un texte LITTÉRAL dans un fichier hors de la racine (le rapport d'un sous-agent), quand ce texte
+// cite la racine ou la commande context-ledger. Constat réel du 2026-10-07 : 6 écritures refusées chez 5
+// sous-agents qui écrivaient LEUR rapport ; chacun y a perdu un tour et trois ont écrit à l'orchestrateur.
+// Seule forme prouvée : un here-string PowerShell littéral (@' ... '@ : rien n'y est développé ni exécuté)
+// donné tel quel à Set-Content, Add-Content ou Out-File, vers un fichier de texte nommé en toutes lettres
+// hors de la racine ; tout le reste de la commande est une lecture. En bash les mêmes caractères seraient
+// du code : l'appelant doit savoir que la commande part dans PowerShell.
+
+// Here-string littéral de la commande : { debut, fin } (délimiteurs compris). null s'il n'y en a pas
+// exactement un, s'il n'est pas fermé, ou si la commande porte un here-string développé (@" "@).
+function hereStringLitteral(c) {
+  const reEntete = /@(['"])[ \t]*(?:\r\n|\n|\r)/y;
+  // La fermeture commence une ligne. PowerShell prend aussi une apostrophe typographique pour une apostrophe,
+  // et un retour chariot seul pour une fin de ligne : le texte s'arrête là où il s'arrêterait pour lui.
+  const reFermeture = /[\r\n]['‘’‚‛]@/g; // ancre-mutation:texte-fermeture
+  let trouve = null;
+  let i = 0;
+  while (i < c.length) {
+    const ch = c[i];
+    if (ch === '@') {
+      reEntete.lastIndex = i;
+      const m = reEntete.exec(c);
+      if (m) {
+        if (m[1] === '"' || trouve) return null;
+        reFermeture.lastIndex = i + m[0].length - 1;
+        const f = reFermeture.exec(c);
+        if (!f) return null;
+        trouve = { debut: i, fin: f.index + f[0].length };
+        i = trouve.fin;
+        continue;
+      }
+    }
+    if (ch === '\'') { // chaîne simple : '' y est une apostrophe
+      let j = i + 1;
+      for (;;) {
+        j = c.indexOf('\'', j);
+        if (j < 0) return null;
+        if (c[j + 1] !== '\'') break;
+        j += 2;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === '"') { // chaîne double : `" et "" y sont un guillemet
+      let j = i + 1;
+      for (; j < c.length; j++) {
+        if (c[j] === '`') { j++; continue; }
+        if (c[j] !== '"') continue;
+        if (c[j + 1] !== '"') break;
+        j++;
+      }
+      if (j >= c.length) return null;
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return trouve;
+}
+
+// Segments d'un masque (chaînes vidées), chacun avec le séparateur qui le précède.
+function bornesSegments(masque) {
+  const reSep = /&&|\|\||[;|\r\n]|(?<![<>])&(?![&>])/g;
+  const out = [];
+  let debut = 0;
+  let sep = '';
+  let m;
+  while ((m = reSep.exec(masque))) { out.push({ a: debut, b: m.index, avant: sep }); debut = m.index + m[0].length; sep = m[0]; }
+  out.push({ a: debut, b: masque.length, avant: sep });
+  return out;
+}
+
+// Arguments d'une écriture : un chemin nommé, une valeur nommée, un encodage et des interrupteurs sans autre
+// effet, rien d'autre (ni argument sans nom, ni -PassThru, ni bloc). Rend { chemin, valeur } (jetons bruts).
+function argumentsEcriture(seg) {
+  const reJeton = /\s+(?:(-[A-Za-z]+)|('(?:[^']|'')*')|("[^"$`]*")|(\$[A-Za-z_]\w*)|([^\s'"$`;|&<>(){},]+))/y;
+  let pos = RE_CMDLET_ECRITURE.exec(seg)[0].length;
+  const jetons = [];
+  while (/\S/.test(seg.slice(pos))) {
+    reJeton.lastIndex = pos;
+    const m = reJeton.exec(seg);
+    if (!m) return null;
+    jetons.push(m[1] ? { param: m[1].toLowerCase() } : { valeur: m[2] || m[3] || m[4] || m[5] });
+    pos = reJeton.lastIndex;
+  }
+  let chemin = null;
+  let valeur = null;
+  for (let k = 0; k < jetons.length; k++) {
+    const p = jetons[k].param;
+    if (!p) return null;
+    const suivant = () => (jetons[k + 1] && jetons[k + 1].valeur !== undefined ? jetons[++k].valeur : null);
+    if (p === '-literalpath' || p === '-path' || p === '-filepath') {
+      if (chemin !== null || (chemin = suivant()) === null) return null;
+    } else if (p === '-value' || p === '-inputobject') {
+      if (valeur !== null || (valeur = suivant()) === null) return null;
+    } else if (p === '-encoding') {
+      if (!/^['"]?[A-Za-z0-9]+['"]?$/.test(suivant() || '')) return null;
+    } else if (p === '-erroraction') {
+      if (!/^(?:stop|continue|silentlycontinue|ignore)$/i.test(suivant() || '')) return null;
+    } else if (p !== '-nonewline' && p !== '-force' && p !== '-append') return null;
+  }
+  return chemin === null ? null : { chemin, valeur };
+}
+
+// Valeur d'un jeton de chemin : chaîne littérale, mot nu, ou variable affectée UNE fois, à un littéral, avant
+// l'écriture (deux affectations : la valeur lue ici ne serait pas forcément celle de l'écriture).
+function valeurLitterale(jeton, segs, masque, limite, debutInstruction) {
+  if (jeton[0] === '\'') return jeton.slice(1, -1).replace(/''/g, '\'');
+  if (jeton[0] === '"') return jeton.slice(1, -1);
+  if (jeton[0] !== '$') return jeton;
+  const nom = jeton.slice(1);
+  const reAff = new RegExp(`^\\$${nom}\\s*=\\s*(?:'([^']*)'|"([^"$\`]*)")$`, 'i');
+  const iA = segs.findIndex(s => reAff.test(s.texte));
+  if (iA < 0 || iA >= limite || !debutInstruction(segs[iA])) return null;
+  const affectations = masque.match(new RegExp(`\\$${nom}\\s*(?:[-+*/%]|\\?\\?)?=(?!=)`, 'gi')) || [];
+  if (affectations.length !== 1) return null; // ancre-mutation:cible-affectee-une-fois
+  const m = reAff.exec(segs[iA].texte);
+  return m[1] !== undefined ? m[1] : m[2];
+}
+
+// Fichier de texte nommé par son chemin complet, hors de la racine. Refusés : chemin relatif, lecteur de
+// fournisseur PowerShell (Variable:, Function:, Env:), joker, variable, nom court, flux, script.
+function cibleDeTexteHorsRacine(valeur, cwd) {
+  const v = chaine(valeur);
+  if (!/^(?:[A-Za-z]:[\\/]|\/(?!\/))/.test(v)) return false; // ancre-mutation:texte-cible-complete
+  if (/[*?[\]`$%~<>|"]/.test(v) || v.slice(2).includes(':')) return false; // ancre-mutation:texte-cible-nommee
+  if (!RE_EXTENSION_TEXTE.test(v)) return false; // ancre-mutation:texte-cible-extension
+  return !cheminDansRacine(v, cwd) && !texteToucheRacine(v);
+}
+
+function ecritureDeTexteLitteral(cmd, cwd, sousAgent) {
+  const c0 = chaine(cmd);
+  if (c0.includes(MARQUE_TEXTE) || c0.includes(MARQUE_SOUS_EXPRESSION)) return false;
+  const h = hereStringLitteral(c0);
+  if (!h) return false;
+  // Pour toute la suite, le here-string n'est plus qu'une chaîne simple d'un caractère : son texte est hors jeu.
+  const jeton = `'${MARQUE_TEXTE}'`;
+  const c = c0.slice(0, h.debut) + jeton + c0.slice(h.fin);
+  if (/\$\(|`/.test(c)) return false;
+  // Hors du texte, rien de ce que PowerShell lit autrement que cette analyse, cible et arguments compris.
+  if (lectureAmbigue(c)) return false; // ancre-mutation:texte-ambigu
+  const masque = masquerChaines(c);
+  const segs = bornesSegments(masque).map(s => Object.assign(s, { texte: c.slice(s.a, s.b).trim() })).filter(s => s.texte);
+  const debutInstruction = s => s.avant === '' || s.avant === ';' || s.avant === '\n' || s.avant === '\r';
+  const iE = segs.findIndex(s => RE_CMDLET_ECRITURE.test(s.texte));
+  if (iE < 0 || segs.some((s, k) => k !== iE && RE_CMDLET_ECRITURE.test(s.texte))) return false;
+  const ecr = segs[iE];
+  if (segs[iE + 1] && !debutInstruction(segs[iE + 1])) return false; // l'écriture termine son pipeline
+  const args = argumentsEcriture(ecr.texte);
+  if (!args) return false;
+  const consommes = [];
+  let source; // ce qui porte le texte : le here-string lui-même, ou la variable qui l'a reçu
+  if (ecr.avant === '|') {
+    const entree = segs[iE - 1];
+    if (!entree || !debutInstruction(entree) || args.valeur !== null) return false;
+    source = entree.texte;
+    consommes.push({ a: entree.a, b: ecr.b });
+  } else {
+    if (!debutInstruction(ecr) || args.valeur === null) return false;
+    source = args.valeur;
+    consommes.push(ecr);
+  }
+  if (source !== jeton) {
+    const nom = (/^\$([A-Za-z_]\w*)$/.exec(source) || [])[1];
+    if (!nom) return false;
+    const reAff = new RegExp(`^\\$${nom}\\s*=\\s*'${MARQUE_TEXTE}'$`, 'i');
+    const iA = segs.findIndex(s => reAff.test(s.texte));
+    if (iA < 0 || iA >= iE || !debutInstruction(segs[iA])) return false;
+    // Ailleurs dans la commande, cette variable n'est qu'une chaîne de plus : le reste doit être une lecture.
+    consommes.push(segs[iA]);
+  }
+  const cible = valeurLitterale(args.chemin, segs, masque, iE, debutInstruction);
+  if (cible === null || !cibleDeTexteHorsRacine(cible, cwd)) return false; // ancre-mutation:texte-hors-racine
+  // Garde-fou courant avant d'écrire : if (Test-Path ...) { throw '...' }. Il arrête la commande, rien d'autre.
+  for (const s of segs) if (RE_GARDE_FOU.test(s.texte)) consommes.push(s);
+  let reste = c;
+  for (const s of consommes) reste = reste.slice(0, s.a) + ' '.repeat(s.b - s.a) + reste.slice(s.b);
+  if (reste.includes(MARQUE_TEXTE)) return false; // le texte sert ailleurs que dans l'écriture
+  return commandeLectureOuCli(reste, sousAgent); // ancre-mutation:texte-reste-lecture
+}
+
+// powershell : l'appelant sait que la commande part dans PowerShell (outil PowerShell, ou adaptateur qui le
+// sait pour son agent). Sans cette preuve, l'écriture d'un texte littéral n'est pas reconnue.
+function gardeOutil({ input, generique, powershell }) {
   const inp = input || {};
   const tn = chaine(inp.tool_name);
   const ti = inp.tool_input || {};
@@ -2467,16 +2778,19 @@ function gardeOutil({ input, generique }) {
   if (OUTILS_SHELL.includes(tn)) {
     const cmd = chaine(ti.command || ti.script || ti.input || ti.cmd);
     if (!cmd) return null;
-    const touche = texteToucheRacine(cmd) || commandeViseRacine(cmd, ti.workdir || ti.cwd || inp.cwd);
+    const dossier = ti.workdir || ti.cwd || inp.cwd;
+    const touche = texteToucheRacine(cmd) || commandeViseRacine(cmd, dossier);
+    // Texte littéral écrit hors de la racine (un rapport qui cite la liste) : seulement en PowerShell prouvé.
+    const texte = qui => (powershell === true || OUTILS_POWERSHELL.includes(tn)) && ecritureDeTexteLitteral(cmd, dossier, qui); // ancre-mutation:texte-powershell
     if (sousAgent) {
       // Lecture permise, écriture refusée ; CLI : lecture, ou note sur sa propre fiche.
       const qui = { agentId: chaine(inp.agent_id) };
-      if (touche) return commandeLectureOuCli(cmd, qui) ? null : RAISON_SOUS_AGENT; // ancre-mutation:lecture-sous-agent
-      if (appelleCli(cmd)) return cliSeuleDuSousAgent(cmd, qui.agentId) ? null : RAISON_SOUS_AGENT;
+      if (touche) return commandeLectureOuCli(cmd, qui) || texte(qui) ? null : RAISON_SOUS_AGENT; // ancre-mutation:lecture-sous-agent
+      if (appelleCli(cmd)) return cliSeuleDuSousAgent(cmd, qui.agentId) || texte(qui) ? null : RAISON_SOUS_AGENT;
       return null;
     }
     if (!touche) return null;
-    return commandeLectureOuCli(cmd) ? null : RAISON_SHELL;
+    return commandeLectureOuCli(cmd) || texte() ? null : RAISON_SHELL;
   }
   if (generique) {
     const brut = JSON.stringify(ti);
@@ -2855,10 +3169,23 @@ function capturerEvenement({ agent, input, octets }) {
     ligne.tool_input = apercu;
     if (estObjet(i.tool_response)) ligne.tool_response_cles = Object.keys(i.tool_response).sort();
     else if (i.tool_response !== undefined) ligne.tool_response_type = typeof i.tool_response;
-  }
+  } else if (estObjet(i.tool_input)) {
+    // Autres outils : la forme de l'entrée, jamais son contenu. Noms des champs, type de la commande (pour
+    // un tableau : le programme et ses options jusqu'à celle qui introduit la commande) et shell nommé. Dit
+    // quel shell exécutera la commande : la garde ne prouve pas la même chose en PowerShell et en bash.
+    const ti = i.tool_input;
+    const c = ti.command !== undefined ? ti.command : (ti.cmd !== undefined ? ti.cmd : ti.script);
+    ligne.outil_cles = Object.keys(ti).sort().slice(0, 20);
+    if (Array.isArray(c)) {
+      const k = c.findIndex(x => /^(-lc|-c|\/c|-command)$/i.test(chaine(x)));
+      ligne.outil_commande = c.slice(0, k >= 0 ? k + 1 : 1).map(x => chaine(x).split(/[\\/]/).pop().slice(0, 24)); // ancre-mutation:capture-forme-outil
+    } else if (c !== undefined) ligne.outil_commande = typeof c;
+    if (typeof ti.shell === 'string') ligne.outil_shell = ti.shell.slice(0, 24);
+  } else if (i.tool_input !== undefined) ligne.outil_type = typeof i.tool_input;
   process.on('exit', () => {
     try {
       ligne.dur_ms = Math.round(process.uptime() * 1000); // démarrage de node compris
+      for (const [k, v] of Object.entries(jalons)) if (v > 0) ligne[k] = v; // ancre-mutation:capture-jalons
       fs.mkdirSync(DOSSIER_CAPTURE, { recursive: true });
       fs.appendFileSync(path.join(DOSSIER_CAPTURE, `${agent || 'inconnu'}.jsonl`), JSON.stringify(ligne) + '\n');
     } catch (_) { /* diagnostic seulement */ }
@@ -2883,7 +3210,7 @@ module.exports = {
   transcriptDUnSousAgent, idDepuisTranscript,
   extraireMarqueurs, marqueursAjoutes, estFichierPreuve, preuveCommit, preuvesDepuisOutil,
   appliquerPreuves, reconcilier, reconcilierDansHook,
-  gardeOutil, texteToucheRacine, commandeViseRacine, appelleCli, commandeLectureOuCli,
+  gardeOutil, texteToucheRacine, commandeViseRacine, appelleCli, commandeLectureOuCli, lectureAmbigue,
   commandes, contexteMessage, contexteSession, contexteApresPreuve, composerContexte,
   executerCli,
 };

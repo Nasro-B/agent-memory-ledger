@@ -25,11 +25,6 @@ const home = path.resolve(iHome >= 0 && args[iHome + 1] ? args[iHome + 1] : (pro
 const cible = path.join(home, 'hooks.json');
 const racine = path.resolve(__dirname, '..').replace(/\\/g, '/');
 const modele = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'codex', 'hooks.modele.json'), 'utf8').split('{{RACINE}}').join(racine));
-if (path.basename(home).toLowerCase() === '.codex-home') {
-  for (const groupes of Object.values(modele.hooks)) for (const groupe of groupes) for (const h of groupe.hooks) {
-    h.command = h.command.replace('/scripts/codex/context-ledger.js', '/scripts/codex-home/context-ledger.js').replace(/--agent codex\b/g, '--agent codex-home');
-  }
-}
 
 // Un hook est « de ce dépôt » quand sa commande appelle un script de ce dossier.
 const estDeCeDepot = h => typeof h.command === 'string' && h.command.replace(/\\/g, '/').includes(racine + '/scripts/');
