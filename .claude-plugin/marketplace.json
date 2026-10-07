@@ -9,7 +9,7 @@
       "name": "agent-memory-ledger",
       "source": "./",
       "description": "Mémoire partagée et liste de travail pour agents de code (Claude Code et Codex) : chaque message devient une ligne de travail qui ne disparaît que sur preuve, les résultats de sous-agents ne s'oublient plus, chaque sous-agent garde sa mission sur une fiche, l'historique survit aux compactages.",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "author": {
         "name": "Nasro-B"
       }

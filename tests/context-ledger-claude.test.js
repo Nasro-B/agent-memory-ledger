@@ -19,6 +19,11 @@ const { test, before } = require('node:test');
 const HOOK = process.env.CONTEXT_LEDGER_HOOK || path.join(__dirname, '..', 'scripts', 'claude', 'context-ledger.js');
 const CORE_PATH = path.join(path.dirname(HOOK), '..', 'lib', 'context-ledger-core.js');
 const EN_MUTATION = process.env.CONTEXT_LEDGER_EN_MUTATION === '1';
+// Délais des processus lancés par ce banc : des garde-fous contre un blocage, pas des mesures. Sous forte charge,
+// un hook met plusieurs secondes à démarrer et la relance « témoin » des mutations groupées (une centaine de
+// secondes au repos) dépassait trois minutes : le banc était rouge sans qu'aucun test ait échoué.
+const DELAI_PROCESSUS_MS = 120000;
+const DELAI_RELANCE_MS = 1200000;
 const BASE_TESTS = process.env.CONTEXT_LEDGER_BASE_TESTS || path.join(os.tmpdir(), 'aml-tests', 'claude');
 const RUN = path.join(BASE_TESTS, (EN_MUTATION ? 'mut-' : 'run-') + Date.now() + '-' + process.pid);
 const VRAIE_MAISON = path.join(os.homedir(), '.agent-memory-ledger');
@@ -66,7 +71,7 @@ function envPour(dir) {
 // plus : { node: options de node avant le script, env: variables propres à cet appel } (voir sousVerrou).
 function hook(dir, payload, plus = null) {
   const r = spawnSync(process.execPath, [...(plus ? plus.node : []), HOOK], {
-    input: JSON.stringify(payload), env: Object.assign(envPour(dir), plus ? plus.env : {}), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
+    input: JSON.stringify(payload), env: Object.assign(envPour(dir), plus ? plus.env : {}), encoding: 'utf8', cwd: dir, timeout: DELAI_PROCESSUS_MS, windowsHide: true,
   });
   const out = (r.stdout || '').trim();
   return { code: r.status, out, err: r.stderr, json: out ? JSON.parse(out) : null };
@@ -75,7 +80,7 @@ function hook(dir, payload, plus = null) {
 function cli(dir, args, plus = null) {
   if (args[0] === 'ajouter' && !args.includes('--session')) args = [...args, '--session', 'sess-1'];
   const r = spawnSync(process.execPath, [...(plus ? plus.node : []), HOOK, ...args], {
-    env: Object.assign(envPour(dir), plus ? plus.env : {}), encoding: 'utf8', cwd: dir, timeout: 30000, windowsHide: true,
+    env: Object.assign(envPour(dir), plus ? plus.env : {}), encoding: 'utf8', cwd: dir, timeout: DELAI_PROCESSUS_MS, windowsHide: true,
   });
   return { code: r.status, out: r.stdout || '', err: r.stderr || '' };
 }
@@ -1183,7 +1188,7 @@ function relancer(hookCopie, motif) {
   delete env.CONTEXT_LEDGER_DIR;
   delete env.NODE_TEST_CONTEXT;
   return spawnSync(process.execPath, ['--test', '--test-reporter=tap', `--test-name-pattern=${motif}`, __filename], {
-    env, encoding: 'utf8', timeout: 180000, windowsHide: true,
+    env, encoding: 'utf8', timeout: DELAI_RELANCE_MS, windowsHide: true,
   });
 }
 
