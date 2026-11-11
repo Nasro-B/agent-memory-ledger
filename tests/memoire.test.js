@@ -327,7 +327,7 @@ test('avant compactage : branche, dernier commit et travail en vol écrits dans 
 });
 
 // ---------------------------------------------------------------------------
-// Rappel des 12 dernières heures
+// Rappel des 6 dernières heures
 
 function semer(m) {
   fs.writeFileSync(histoire(m, 'claude'), `# Historique\n\n---\n\n## ${horo()} | fix | récent du projet | Claude\n\n- détail récent\n\n## ${horo(-48 * 3600000)} | fix | vieux de deux jours | Claude\n\n- détail ancien\n`);
@@ -335,12 +335,12 @@ function semer(m) {
   fs.writeFileSync(path.join(m.maison, 'Memory-Auto.md'), `# Memory-Auto\n\n### ${PROJET}\n- ${horo()} | fix | récent du projet | Claude\n- ${horo(-48 * 3600000)} | fix | vieux de deux jours | Claude\n`);
 }
 
-test('rappel (Claude) : après compactage, les entrées de moins de 12 h, projet courant d\'abord ; démarrage : les autres projets ; reprise : rien', () => {
+test('rappel (Claude) : après compactage, les entrées de moins de 6 h, projet courant d\'abord ; démarrage : les autres projets ; reprise : rien', () => {
   const m = monde('rappel', { depot: false });
   semer(m);
   const ss = source => hook(m, 'rappel.js', 'claude', { hook_event_name: 'SessionStart', session_id: 's1', cwd: m.repo, source });
   const c = ctx(ss('compact'));
-  assert.match(c, /^APRÈS COMPACTAGE : consulte la mémoire et l'historique des 12 dernières heures AVANT de continuer\. 3 entrée\(s\) réinjectée\(s\)/);
+  assert.match(c, /^APRÈS COMPACTAGE : consulte la mémoire et l'historique des 6 dernières heures AVANT de continuer. 3 entrée\(s\) réinjectée\(s\)/);
   assert.ok(c.includes('récent du projet') && c.includes('récent ailleurs') && !c.includes('vieux de deux jours'));
   assert.ok(c.indexOf('history/projet-demo.claude.md') < c.indexOf('history/autre-projet.codex.md'), 'projet courant d\'abord');
   assert.ok(c.length <= 9000);
@@ -486,7 +486,7 @@ function relancer(scripts, motif) {
 }
 
 test('mutation : citation prise pour un commit, marqueur gardé après commit, entrée doublée, drapeau pris par tous -> banc rouge', { skip: EN_MUTATION }, () => {
-  const motif = '^commit : entr|^commit : git|^rappel \\(Codex\\)';
+  const motif = '^commit : entr|^commit : git|^rappel \\(Codex\\)|^rappel : les entr|^point de contr.le : aussi';
   const temoin = relancer(copie('temoin'), motif);
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
   const mutations = [
@@ -495,10 +495,95 @@ test('mutation : citation prise pour un commit, marqueur gardé après commit, e
     ['journal-doublon', path.join('lib', 'memoire.js'), '  // MUTATION : dédoublonnage du journal retiré', /not ok \d+ - commit : entr/],
     ['rappel-drapeau', path.join('memoire', 'rappel.js'), '    const d = {}; // MUTATION : drapeau non vérifié', /not ok \d+ - rappel \(Codex\)/],
     ['commit-delai', path.join('memoire', 'commit.js'), '      if (false) { // MUTATION : délai dépassé passé sous silence', /not ok \d+ - commit : git ne r/],
+    ['rappel-bruit', path.join('memoire', 'rappel.js'), '        // MUTATION : entrées automatiques rappelées', /not ok \d+ - rappel : les entr/],
+    ['rappel-plafond-entree', path.join('memoire', 'rappel.js'), '        // MUTATION : plus de plafond par entrée', /not ok \d+ - rappel : les entr/],
+    ['checkpoint-sans-git', path.join('memoire', 'checkpoint.js'), '  if (!etat) return; // MUTATION : entrée vide hors dépôt git', /not ok \d+ - point de contr.le : aussi/],
   ];
   for (const [ancre, fichier, remplacement, rouge] of mutations) {
     const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), motif);
     assert.notEqual(r.status, 0, `la mutation ${ancre} doit rendre un banc rouge :\n` + r.stdout);
     assert.match(r.stdout, rouge, ancre);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 0.6.0 : rappel de 6 h sans les entrées automatiques, plafond par entrée, un seul état avant compactage ;
+// point de contrôle pendant le tour ; DeepSeek Harness reconnu par les scripts de mémoire.
+
+test('rappel : les entrées automatiques sont ignorées et comptées, une entrée longue ne cache plus la suivante, un seul état avant compactage', () => {
+  const m = monde('rappel-bruit', { depot: false });
+  const longue = Array.from({ length: 30 }, (_, i) => '- ligne de détail ' + i + ' ' + 'x'.repeat(60)).join('\n');
+  fs.writeFileSync(histoire(m, 'claude'), '# Historique\n\n---\n\n' + [
+    `## ${horo(-60000)} | precompact | État sauvé avant compactage automatique | Claude\n\n- PRECOMPACT-RECENT`,
+    `## ${horo(-120000)} | checkpoint | Point de contrôle automatique (2h00) | Claude\n\n- CORPS-CHECKPOINT`,
+    `## ${horo(-180000)} | wip | session terminée : 3 fichier(s) modifié(s) NON commité(s) (dernier : a.js), à documenter | Claude\n\n- CORPS-FIN`,
+    `## ${horo(-240000)} | fix | ENTREE-LONGUE | Claude\n\n${longue}\n- FIN-DE-LA-LONGUE`,
+    `## ${horo(-300000)} | fix | ENTREE-SUIVANTE | Claude\n\n- détail court`,
+    `## ${horo(-360000)} | precompact | État sauvé avant compactage automatique | Claude\n\n- PRECOMPACT-ANCIEN`,
+  ].join('\n\n') + '\n');
+  fs.writeFileSync(path.join(m.maison, 'Memory-Auto.md'), `# Memory-Auto\n\n### ${PROJET}\n- ${horo(-180000)} | wip | session terminée : 3 fichier(s) modifié(s) NON commité(s) (dernier : a.js), à documenter | Claude\n- ${horo(-240000)} | fix | LIGNE-REELLE | Claude\n`);
+  const c = ctx(hook(m, 'rappel.js', 'claude', { hook_event_name: 'SessionStart', session_id: 's1', cwd: m.repo, source: 'compact' }));
+  assert.match(c, /^APRÈS COMPACTAGE : consulte la mémoire et l'historique des 6 dernières heures/);
+  assert.ok(c.includes('ENTREE-LONGUE') && c.includes('ENTREE-SUIVANTE') && c.includes('LIGNE-REELLE') && c.includes('PRECOMPACT-RECENT'));
+  assert.ok(!c.includes('CORPS-CHECKPOINT') && !c.includes('CORPS-FIN') && !c.includes('session terminée') && !c.includes('PRECOMPACT-ANCIEN') && !c.includes('FIN-DE-LA-LONGUE'));
+  assert.match(c, /entrée coupée à 800 car\. : suite dans /);
+  assert.match(c, /4 entrée\(s\) réinjectée\(s\) ci-dessous/);
+  assert.match(c, /4 entrée\(s\) automatique\(s\) ignorée\(s\)/);
+  assert.ok(c.length <= 9000);
+});
+
+test('rappel : sans autre entrée que des entrées automatiques, il le dit', () => {
+  const m = monde('rappel-que-du-bruit', { depot: false });
+  fs.writeFileSync(histoire(m, 'claude'), `# Historique\n\n---\n\n## ${horo(-60000)} | checkpoint | Point de contrôle automatique (2h00) | Claude\n\n- x\n`);
+  const c = ctx(hook(m, 'rappel.js', 'claude', { hook_event_name: 'SessionStart', session_id: 's1', cwd: m.repo, source: 'compact' }));
+  assert.match(c, /Aucune entrée datée de moins de 6 heures\. 1 entrée\(s\) automatique\(s\) ignorée\(s\)/);
+});
+
+test('DeepSeek Harness : reconnu par les scripts de mémoire (le nom d\'agent en majuscule n\'est plus rejeté)', () => {
+  const m = monde('deepseek');
+  commiter(m, 'premier.txt', 'chore: base');
+  const config = require(path.join(SCRIPTS, 'lib', 'config.js'));
+  for (const ecrit of ['deepseek_H', 'deepseek_h', 'DEEPSEEK_H']) assert.equal(config.agentDepuisArgs(['--agent', ecrit]), 'deepseek_H');
+  assert.equal(config.agentDepuisArgs(['--agent', 'Claude']), 'claude');
+  assert.equal(config.agentDepuisArgs(['--agent', 'inconnu']), null);
+  // Avant compactage : son journal est écrit et signé.
+  hook(m, 'avant-compactage.js', 'deepseek_H', { session_id: 's1', cwd: m.repo, trigger: 'auto' });
+  assert.match(lire(histoire(m, 'deepseek_H')), /\| precompact \| État sauvé avant compactage automatique \| DeepSeek Harness/);
+  // Rappel : drapeau au PostCompact, injection au premier outil, une seule fois ; au démarrage, rien (demarrage.js s'en charge).
+  fs.writeFileSync(histoire(m, 'claude'), `# Historique\n\n---\n\n## ${horo()} | fix | RECENT-POUR-DEEPSEEK | Claude\n\n- détail\n`);
+  assert.equal(hook(m, 'rappel.js', 'deepseek_H', { hook_event_name: 'SessionStart', session_id: 's1', cwd: m.repo, source: 'startup' }).out, '');
+  assert.equal(hook(m, 'rappel.js', 'deepseek_H', { hook_event_name: 'PostToolUse', session_id: 's1', cwd: m.repo }).out, '', 'sans compactage : rien');
+  assert.equal(hook(m, 'rappel.js', 'deepseek_H', { hook_event_name: 'PostCompact', session_id: 's1', cwd: m.repo }).out, '');
+  const r = hook(m, 'rappel.js', 'deepseek_H', { hook_event_name: 'PostToolUse', session_id: 's1', cwd: m.repo });
+  assert.equal(r.json.hookSpecificOutput.hookEventName, 'PostToolUse');
+  assert.ok(ctx(r).includes('RECENT-POUR-DEEPSEEK'));
+  assert.equal(hook(m, 'rappel.js', 'deepseek_H', { hook_event_name: 'PostToolUse', session_id: 's1', cwd: m.repo }).out, '', 'une seule fois');
+  // Point de contrôle : écrit dans son journal, sans sortie.
+  hook(m, 'checkpoint.js', 'deepseek_H', { hook_event_name: 'Stop', session_id: 's1', cwd: m.repo });
+  fs.writeFileSync(path.join(m.maison, 'etat', `.checkpoint-${PROJET}-deepseek_H`), JSON.stringify({ ts: new Date(Date.now() - 3 * 3600000).toISOString(), sessionId: 's1' }));
+  assert.equal(hook(m, 'checkpoint.js', 'deepseek_H', { hook_event_name: 'Stop', session_id: 's1', cwd: m.repo }).out, '');
+  assert.match(lire(histoire(m, 'deepseek_H')), /\| checkpoint \| Point de contrôle automatique \(3h0\d\) \| DeepSeek Harness/);
+});
+
+test('point de contrôle : aussi après un outil (sans sortie), même si la session a changé ; jamais pour un sous-agent ; rien hors dépôt git', () => {
+  const m = monde('checkpoint-outil');
+  commiter(m, 'premier.txt', 'chore: base');
+  const f = path.join(m.maison, 'etat', `.checkpoint-${PROJET}-claude`);
+  const vieillir = () => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify({ ts: new Date(Date.now() - 3 * 3600000).toISOString(), sessionId: 'autre-session' })); };
+  vieillir();
+  assert.equal(hook(m, 'checkpoint.js', 'claude', { hook_event_name: 'PostToolUse', session_id: 's1', cwd: m.repo, agent_id: 'a1' }).out, '');
+  assert.equal(lire(histoire(m)), '', 'un sous-agent n\'écrit pas de point de contrôle');
+  const r = hook(m, 'checkpoint.js', 'claude', { hook_event_name: 'PostToolUse', session_id: 's1', cwd: m.repo });
+  assert.equal(r.out, '', 'aucune sortie après un outil');
+  assert.match(lire(histoire(m)), /\| checkpoint \| Point de contrôle automatique \(3h0\d\) \| Claude/);
+  // Hors dépôt git (projet connu par la table) : rien n'est écrit, la fenêtre repart.
+  const s = monde('checkpoint-sans-git', { depot: false });
+  fs.writeFileSync(path.join(s.maison, 'projets.json'), JSON.stringify({ projets: [{ nom: PROJET, motif: 'checkpoint-sans-git' }] }));
+  const g = path.join(s.maison, 'etat', `.checkpoint-${PROJET}-claude`);
+  fs.mkdirSync(path.dirname(g), { recursive: true });
+  const vieux = new Date(Date.now() - 3 * 3600000).toISOString();
+  fs.writeFileSync(g, JSON.stringify({ ts: vieux, sessionId: 's1' }));
+  assert.equal(hook(s, 'checkpoint.js', 'claude', { hook_event_name: 'Stop', session_id: 's1', cwd: s.repo }).out, '');
+  assert.equal(lire(histoire(s)), '', 'pas d\'entrée « état git indisponible »');
+  assert.notEqual(JSON.parse(fs.readFileSync(g, 'utf8')).ts, vieux, 'la fenêtre repart');
 });

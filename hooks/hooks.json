@@ -24,7 +24,7 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/rappel.js\" --agent claude",
             "timeout": 15,
-            "statusMessage": "Historique des 12 dernières heures..."
+            "statusMessage": "Historique des 6 dernières heures..."
           }
         ]
       }
@@ -63,6 +63,12 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude/context-ledger.js\"",
             "timeout": 30,
             "statusMessage": "Liste de travail : preuves [ctx]..."
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/checkpoint.js\" --agent claude",
+            "timeout": 10,
+            "statusMessage": "Mémoire : point de contrôle pendant le tour..."
           }
         ]
       },

@@ -191,7 +191,7 @@ const config = require('./config.js');
 
 const AGENTS = config.AGENTS;
 // Dossier de l'adaptateur (scripts/claude, scripts/codex) -> agent.
-const DOSSIERS_AGENTS = { claude: 'claude', codex: 'codex' };
+const DOSSIERS_AGENTS = { claude: 'claude', codex: 'codex', deepseek_h: 'deepseek_H' };
 const PLAFOND = 9000;
 const EXTRAIT_M = 300;
 const EXTRAIT_C = 400;
@@ -885,6 +885,7 @@ function ligneDemande(etat, id, max) {
   return `- ${id} | ${d.date} | ${extrait(d.texte, max, cheminTexte(etat.projet, etat.agent, id))}`;
 }
 
+const NOTE_COMPACTE = 300;
 function ligneTravail(etat, id, max) {
   const l = etat.lignes[id];
   const parts = [
@@ -893,7 +894,11 @@ function ligneTravail(etat, id, max) {
     `état : ${l.statut}`,
   ];
   if (l.statut === 'abandon-utilisateur' && l.citationUtilisateur) parts.push(`citation de l'utilisateur : « ${aplatir(l.citationUtilisateur)} »`);
-  else if (l.note) parts.push(aplatir(l.note));
+  else if (l.note) {
+    // Forme compacte (réinjection) : une note très longue ne doit pas manger le plafond à chaque fois.
+    const n = aplatir(l.note);
+    parts.push(max <= EXTRAIT_COMPACT && n.length > NOTE_COMPACTE ? n.slice(0, NOTE_COMPACTE) + '… (note coupée : lister)' : n);
+  }
   return '- ' + parts.join(' | ');
 }
 
@@ -2817,7 +2822,37 @@ function commandes(script, projet, sessionId) {
   };
 }
 
-function lignesCompactes(etat) {
+const TITRE_SANS_CONVERSATION = 'Sans conversation (ajoutées sans --session : à reprendre par la commande reprendre, ou à fermer sur preuve) :';
+
+// Lignes ouvertes du projet qui n'appartiennent à AUCUNE conversation : ni session propre, ni session de leur
+// message d'origine, ni tâche ou reprise d'une session de cet agent. Avant le 2026-11-11 elles n'étaient
+// réinjectées à personne (mesure : 66 lignes ouvertes dans ce cas). Les fichiers de session ne sont lus que
+// s'il existe des candidates.
+function lignesSansConversation(complet, agent, etatSession) {
+  const candidates = trierIds(complet.lignes).filter(id => {
+    const l = complet.lignes[id];
+    if (!['ouvert', 'en-cours', 'bloque-utilisateur'].includes(l.statut)) return false;
+    if (etatSession && etatSession.lignes[id]) return false;
+    return !l.session && !(l.de && complet.demandes[l.de] && complet.demandes[l.de].session); // ancre-mutation:sans-conversation
+  });
+  if (!candidates.length) return [];
+  const prises = new Set();
+  try {
+    const dossier = path.join(racine(), '.sessions');
+    for (const nom of fs.readdirSync(lp(dossier))) {
+      if (!nom.startsWith(`${agent}-`) || !nom.endsWith('.json')) continue;
+      let s = null;
+      try { s = JSON.parse(sansBom(lireTexte(path.join(dossier, nom)) || 'null')); } catch (_) { s = null; }
+      if (!estObjet(s)) continue;
+      for (const t of Object.values(estObjet(s.taches) ? s.taches : {})) if (estObjet(t) && t.projet === complet.projet) prises.add(t.ligne);
+      const r = estObjet(s.reprises) ? s.reprises[complet.projet] : null;
+      for (const id of Array.isArray(r) ? r : []) prises.add(id);
+    }
+  } catch (_) { /* dossier absent : aucune session ne les a prises */ }
+  return candidates.filter(id => !prises.has(id));
+}
+
+function lignesCompactes(etat, sansConversation, complet) {
   const aTrier = trierIds(etat.demandes).filter(id => etat.demandes[id].statut === 'a-trier');
   const ouverts = trierIds(etat.lignes).filter(id => ['ouvert', 'en-cours'].includes(etat.lignes[id].statut));
   const bloques = trierIds(etat.lignes).filter(id => etat.lignes[id].statut === 'bloque-utilisateur');
@@ -2826,23 +2861,59 @@ function lignesCompactes(etat) {
   if (ouverts.length) { out.push('Ouvert :'); for (const id of ouverts) out.push(ligneTravail(etat, id, EXTRAIT_COMPACT)); }
   if (bloques.length) { out.push('Bloqué : attend l\'utilisateur :'); for (const id of bloques) out.push(ligneTravail(etat, id, EXTRAIT_COMPACT)); }
   if (!out.length) out.push('Aucune ligne ouverte ni message à trier.');
+  if (Array.isArray(sansConversation) && sansConversation.length && complet) {
+    out.push(TITRE_SANS_CONVERSATION);
+    for (const id of sansConversation) out.push(ligneTravail(complet, id, EXTRAIT_COMPACT));
+  }
   return out;
 }
 
+// Marge laissée à l'adaptateur (règle des découvertes, messages en file, suivi des sous-agents) : sans elle, son
+// filet `ajuster` retire les dernières lignes « - », donc les plus récentes.
+const MARGE_ADAPTATEUR = 450;
+const ANNONCE_ANCIENNES = 'Liste coupée au plafond : ce sont les lignes les plus anciennes qui ne sont pas montrées.';
+
+// Sous le plafond, ce sont les lignes les plus ANCIENNES qui sautent (version 0.6.0 ;
+// mesure : une session à 157 lignes ouvertes ne revoyait que les plus anciennes après chaque compactage). Les
+// sections gardent leur ordre de priorité (À trier, Ouvert, Bloqué, Sans conversation) ; dans une section, on
+// retient depuis la plus récente ; l'affichage reste dans l'ordre habituel. Un titre ne reste qu'avec une ligne.
 function composerContexte(entete, lignes, pied, commandeLister, max = PLAFOND) {
   const e = chaine(entete);
   const p = chaine(pied);
   const reserve = 80 + chaine(commandeLister).length;
-  let taille = e.length + p.length + 2;
-  const retenues = [];
-  let i = 0;
-  for (; i < lignes.length; i++) {
-    if (taille + lignes[i].length + 1 + reserve > max) break;
-    retenues.push(lignes[i]);
-    taille += lignes[i].length + 1;
+  const base = e.length + p.length + 2;
+  let retenues;
+  if (base + lignes.reduce((n, l) => n + l.length + 1, 0) + reserve <= max) {
+    retenues = lignes.slice();
+  } else {
+    const garde = new Array(lignes.length).fill(false);
+    const sections = [];
+    let cour = { titre: -1, items: [] };
+    lignes.forEach((l, i) => {
+      if (l.startsWith('- ')) { cour.items.push(i); return; }
+      if (cour.titre >= 0 || cour.items.length) sections.push(cour);
+      cour = { titre: i, items: [] };
+    });
+    sections.push(cour);
+    let taille = base + reserve + ANNONCE_ANCIENNES.length + 1;
+    let plein = false;
+    for (const s of sections) {
+      if (plein) break;
+      let titrePris = s.titre < 0;
+      for (let k = s.items.length - 1; k >= 0; k--) {
+        const i = s.items[k];
+        const cout = lignes[i].length + 1 + (titrePris ? 0 : lignes[s.titre].length + 1);
+        if (taille + cout > max) { plein = true; break; } // ancre-mutation:plafond-recentes
+        if (!titrePris) { garde[s.titre] = true; titrePris = true; }
+        garde[i] = true;
+        taille += cout;
+      }
+      if (!s.items.length && s.titre >= 0 && taille + lignes[s.titre].length + 1 <= max) { garde[s.titre] = true; taille += lignes[s.titre].length + 1; }
+    }
+    retenues = lignes.filter((_, i) => garde[i]);
+    const restantes = lignes.filter((l, i) => !garde[i] && l.startsWith('- ')).length;
+    if (restantes) retenues.push(ANNONCE_ANCIENNES, `(${restantes} lignes de plus : ${commandeLister})`);
   }
-  const restantes = lignes.slice(i).filter(l => l.startsWith('- ')).length;
-  if (restantes) retenues.push(`(${restantes} lignes de plus : ${commandeLister})`);
   let texte = [e, ...retenues, p].filter(Boolean).join('\n');
   if (texte.length > max) texte = texte.slice(0, max - 1) + '…';
   return texte;
@@ -2871,10 +2942,42 @@ function reprendreLignes({ agent, projet, sessionId, ids }) {
 
 function contexteMessage({ agent, projet, idMessage, script, sessionId }) {
   const cmd = commandes(script, projet, sessionId);
-  const etat = etatDeSession(lireLedger(projet, agent), agent, sessionId);
+  const complet = lireLedger(projet, agent);
+  const etat = etatDeSession(complet, agent, sessionId);
+  const sansConversation = sessionId ? lignesSansConversation(complet, agent, etat) : [];
   const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\n${POUR_ORCHESTRATEUR}`; // ancre-mutation:pour-orchestrateur
   const pied = `Nouveau message ${idMessage}. Avant d'agir : transforme-le en ligne(s) de travail avec \`${cmd.ajouter(idMessage)}\` ou classe-le avec \`${cmd.sansTravail(idMessage)}\`. Citer \`[ctx C-NNNN]\` dans l'historique ou le commit quand c'est fait ; \`[ctx C-NNNN partiel]\` si ce n'est pas fini.`;
-  return composerContexte(entete, lignesCompactes(etat), pied, cmd.lister);
+  return composerContexte(entete, lignesCompactes(etat, sansConversation, complet), pied, cmd.lister, PLAFOND - MARGE_ADAPTATEUR);
+}
+
+// Messages de l'utilisateur gardés par secours() (verrou ou disque en panne à l'enregistrement) et jamais inscrits dans
+// la liste : avant le 2026-11-11 personne ne relisait ce fichier. Redonnés à LEUR session tant qu'aucune demande
+// ni ligne du projet ne porte leur début ; au plus 3, de moins de 14 jours. Jamais de ligne « - » (elles
+// fausseraient le compte des lignes montrées).
+const SECOURS_JOURS = 14;
+const SECOURS_MAX = 3;
+const SECOURS_EXTRAIT = 300;
+function texteSecoursEnAttente(agent, sessionId, complet) {
+  if (!sessionId) return '';
+  let brut = '';
+  try { brut = chaine(lireTexte(path.join(racine(), `.secours-${agent}.jsonl`))); } catch (_) { return ''; }
+  if (!brut) return '';
+  const limite = Date.now() - SECOURS_JOURS * 86400000;
+  const connus = [...Object.values(complet.demandes), ...Object.values(complet.lignes)].map(x => aplatir(chaine(x.texte)));
+  const attente = [];
+  for (const ligne of brut.split('\n')) {
+    if (!ligne.trim()) continue;
+    let m = null;
+    try { m = JSON.parse(ligne); } catch (_) { continue; }
+    if (!estObjet(m) || m.session !== sessionId) continue;
+    if ((Date.parse(chaine(m.ts)) || 0) < limite) continue;
+    const t = aplatir(chaine(m.texte));
+    if (!t) continue;
+    if (connus.some(c => c.includes(t.slice(0, 80)))) continue; // ancre-mutation:secours-deja-inscrit
+    attente.push(`[${chaine(m.ts).slice(0, 16).replace('T', ' ')} UTC] « ${t.length > SECOURS_EXTRAIT ? t.slice(0, SECOURS_EXTRAIT) + '…' : t} »`);
+  }
+  if (!attente.length) return '';
+  return ['Message(s) de l\'utilisateur gardé(s) en copie de secours et jamais inscrit(s) (incident à l\'enregistrement) : inscris chacun avec la commande ajouter, texte mot pour mot.', ...attente.slice(-SECOURS_MAX)].join('\n');
 }
 
 function contexteSession({ agent, projet, script, sessionId }) {
@@ -2884,11 +2987,14 @@ function contexteSession({ agent, projet, script, sessionId }) {
   const alerte = avertissementSecours();
   let attente = '';
   try { attente = texteSignalementsEnAttente({ agent, projet, sessionId }); } catch (_) { attente = ''; } // ancre-mutation:signalements-attente
-  const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\nCe fichier fait foi pour ce qui reste, pas le résumé de compactage.\n${POUR_ORCHESTRATEUR}${alerte ? '\n' + alerte : ''}${attente ? '\n' + attente : ''}`;
-  const autres = sessionId ? Object.keys(complet.lignes).filter(id => !etat.lignes[id] && !TERMINAUX.includes(complet.lignes[id].statut)).length : 0;
+  let secoursEnAttente = '';
+  try { secoursEnAttente = texteSecoursEnAttente(agent, sessionId, complet); } catch (_) { secoursEnAttente = ''; }
+  const entete = `Fichier contexte (projet ${projet}, agent ${agent}) : ${chemins(projet, agent).md}\nCe fichier fait foi pour ce qui reste, pas le résumé de compactage.\n${POUR_ORCHESTRATEUR}${alerte ? '\n' + alerte : ''}${attente ? '\n' + attente : ''}${secoursEnAttente ? '\n' + secoursEnAttente : ''}`;
+  const sansConversation = sessionId ? lignesSansConversation(complet, agent, etat) : [];
+  const autres = sessionId ? Object.keys(complet.lignes).filter(id => !etat.lignes[id] && !sansConversation.includes(id) && !TERMINAUX.includes(complet.lignes[id].statut)).length : 0;
   const scope = sessionId ? `\nPerimetre : cette conversation. ${autres} ligne(s) d'autres missions conservees sur disque, sans ordre de les executer. Pour reprendre une mission : \`${cmd.reprendre}\`. Pour un livrable examine et prouve : \`${cmd.traiter}\`.` : '';
   const pied = `Commandes : \`${cmd.ajouter()}\` ; \`${cmd.etat}\` ; \`${cmd.lister}\`. Une ligne ne disparaît que sur preuve [ctx C-NNNN] (historique, mémoire ou commit).${scope}`;
-  return composerContexte(entete, lignesCompactes(etat), pied, cmd.lister);
+  return composerContexte(entete, lignesCompactes(etat, sansConversation, complet), pied, cmd.lister, PLAFOND - MARGE_ADAPTATEUR);
 }
 
 function contexteApresPreuve({ agent, projet, script, resultat, preuve, sessionId }) {
@@ -2897,7 +3003,7 @@ function contexteApresPreuve({ agent, projet, script, resultat, preuve, sessionI
   const faits = resultat.faits.length ? `Retiré sur preuve (${preuve}) : ${resultat.faits.join(', ')}.` : '';
   const partiels = resultat.partiels.length ? `Passé en-cours (partiel, ${preuve}) : ${resultat.partiels.join(', ')}.` : '';
   const entete = [`Fichier contexte (projet ${projet}, agent ${agent}) mis à jour.`, POUR_ORCHESTRATEUR, faits, partiels, 'Reste :'].filter(Boolean).join('\n');
-  return composerContexte(entete, lignesCompactes(etat), '', cmd.lister);
+  return composerContexte(entete, lignesCompactes(etat), '', cmd.lister, PLAFOND - MARGE_ADAPTATEUR);
 }
 
 // ---------------------------------------------------------------------------

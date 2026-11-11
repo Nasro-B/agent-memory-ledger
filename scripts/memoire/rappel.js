@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 // Rappel de la mémoire récente : après un compactage (ou un /clear), le modèle reçoit les entrées de
-// l'historique et du résumé commun écrites depuis moins de 12 heures, projet courant d'abord.
-//   node rappel.js --agent claude|codex
+// l'historique et du résumé commun écrites depuis moins de 6 heures, projet courant d'abord.
+//   node rappel.js --agent claude|codex|deepseek_H
+// Les entrées écrites par les hooks eux-mêmes (points de contrôle, fins de session) ne sont pas rappelées : elles
+// sont comptées et annoncées. Un seul « État sauvé avant compactage » par fichier, le plus récent. Chaque entrée
+// est coupée à PLAFOND_ENTREE avec son chemin : sans cela une seule entrée longue prenait tout le plafond du fichier.
 //
 // Claude Code : à brancher sur SessionStart (startup|clear|compact).
 //   compact, clear : tout ; startup : les AUTRES projets seulement (demarrage.js sert déjà le projet courant) ;
@@ -11,7 +14,7 @@
 //   PostCompact (pose un drapeau pour la session), UserPromptSubmit et PostToolUse (le premier qui passe prend
 //   le drapeau sous verrou et injecte le rappel), et SessionStart (injection directe si source = compact|clear).
 // Un sous-agent ne pose ni ne consomme le drapeau : chez Codex, son session_id est celui de l'orchestrateur.
-// Léger : ne lit que les fichiers modifiés depuis moins de 12 heures.
+// Léger : ne lit que les fichiers modifiés depuis moins de 6 heures.
 
 const fs = require('fs');
 const path = require('path');
@@ -19,8 +22,10 @@ const config = require('../lib/config.js');
 const memoire = require('../lib/memoire.js');
 
 const AGENT = config.agentDepuisArgs(process.argv);
-const FENETRE_MS = 12 * 60 * 60 * 1000;
-const PLAFOND_FICHIER = 2500, PLAFOND_RESUME = 2000, RESERVE_ENTETE = 600;
+const FENETRE_MS = 6 * 60 * 60 * 1000;
+const PLAFOND_FICHIER = 2500, PLAFOND_RESUME = 2000, RESERVE_ENTETE = 600, PLAFOND_ENTREE = 800;
+const BRUIT = /\| (?:checkpoint \| Point de contrôle automatique \(|wip \| session terminée :)/;
+const PRECOMPACT = /\| precompact \| /;
 const DRAPEAU_PERIME_MS = 7 * 24 * 60 * 60 * 1000;
 
 function dossierDrapeaux() { return config.chemins().etat; }
@@ -45,20 +50,27 @@ function construire(source, cwd) {
   fichiers.sort((a, b) => (duProjet(a.f) ? 0 : 1) - (duProjet(b.f) ? 0 : 1) || b.m - a.m);
 
   const items = [];
-  let vues = 0;
+  let vues = 0, ignorees = 0;
   for (const { f } of fichiers) {
     let brut = '';
     try { brut = fs.readFileSync(path.join(c.history, f), 'utf8'); } catch (_) { continue; }
     const gardees = [];
-    let garder = false, pris = 0, plein = false;
+    let garder = false, pris = 0, plein = false, dejaPrecompact = false, prisEntree = 0, entreeCoupee = false;
     // Après le plafond par fichier, on continue de COMPTER les entrées récentes : le total annoncé est le vrai.
     for (const ligne of brut.split(/\r?\n/)) {
       const h = /^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \|/.exec(ligne);
-      if (h) { const t = memoire.lireHorodatage(h[1]); garder = t !== null && t >= limite; if (garder) vues++; }
+      if (h) {
+        const t = memoire.lireHorodatage(h[1]);
+        garder = t !== null && t >= limite;
+        if (garder && BRUIT.test(ligne)) { garder = false; ignorees++; } // ancre-mutation:rappel-bruit
+        if (garder && PRECOMPACT.test(ligne)) { if (dejaPrecompact) { garder = false; ignorees++; } dejaPrecompact = true; }
+        if (garder) { vues++; prisEntree = 0; entreeCoupee = false; }
+      }
       else if (/^## /.test(ligne)) garder = false;
-      if (garder && !plein) {
-        gardees.push(ligne); pris += ligne.length + 1;
+      if (garder && !plein && !entreeCoupee) {
+        gardees.push(ligne); pris += ligne.length + 1; prisEntree += ligne.length + 1;
         if (pris > PLAFOND_FICHIER) { gardees.push('[... tronqué à ' + PLAFOND_FICHIER + ' car. : suite dans ' + path.join(c.history, f) + ']'); plein = true; }
+        else if (prisEntree > PLAFOND_ENTREE) { gardees.push('[... entrée coupée à ' + PLAFOND_ENTREE + ' car. : suite dans ' + path.join(c.history, f) + ']'); entreeCoupee = true; } // ancre-mutation:rappel-plafond-entree
       }
     }
     if (gardees.length) items.push({ prio: duProjet(f) ? 1 : 2, path: path.join(c.history, f), text: '### history/' + f + '\n' + gardees.join('\n').trim() });
@@ -74,24 +86,26 @@ function construire(source, cwd) {
         if (!h) continue;
         const t = memoire.lireHorodatage(h[1]);
         if (t === null || t < limite) continue;
+        if (BRUIT.test(ligne)) { ignorees++; continue; }
         vues++;
         if (plein) continue;
         out.push('[' + section + '] ' + ligne); pris += section.length + 3 + ligne.length + 1;
         if (pris > PLAFOND_RESUME) { out.push('[... tronqué : suite dans ' + c.resume + ']'); plein = true; }
       }
-      if (out.length) items.push({ prio: 0, path: c.resume, text: '### Memory-Auto.md (lignes de moins de 12 h)\n' + out.join('\n') });
+      if (out.length) items.push({ prio: 0, path: c.resume, text: '### Memory-Auto.md (lignes de moins de 6 h)\n' + out.join('\n') });
     }
   } catch (_) { /* pas encore de résumé */ }
 
   if (source === 'startup' && !items.length) return { texte: '', injectees: 0 };
   const titres = { compact: 'APRÈS COMPACTAGE', clear: 'APRÈS /clear (contexte vide)', startup: 'DÉMARRAGE : rappel des autres projets' };
-  const entete = (titres[source] || titres.compact) + ' : consulte la mémoire et l\'historique des 12 dernières heures AVANT de continuer. ';
-  if (!items.length) return { texte: entete + 'Aucune entrée datée de moins de 12 heures.', injectees: 0 };
+  const entete = (titres[source] || titres.compact) + ' : consulte la mémoire et l\'historique des 6 dernières heures AVANT de continuer. ';
+  const bruit = ignorees ? ' ' + ignorees + ' entrée(s) automatique(s) ignorée(s) (points de contrôle, fins de session, anciens états avant compactage).' : '';
+  if (!items.length) return { texte: entete + 'Aucune entrée datée de moins de 6 heures.' + bruit, injectees: 0 };
   const corps = memoire.assembler(items, memoire.PLAFOND - RESERVE_ENTETE);
   const injectees = (corps.match(/^## \d{4}-\d{2}-\d{2} \d{2}:\d{2} \|/gm) || []).length
     + (corps.match(/^\[[^\]\n]*\] - \d{4}-\d{2}-\d{2} \d{2}:\d{2} \|/gm) || []).length;
   const partiel = injectees < vues ? ' (' + vues + ' au total : le reste est tronqué ou non injecté, lis les fichiers indiqués)' : '';
-  return { texte: entete + injectees + ' entrée(s) réinjectée(s) ci-dessous' + partiel + ' : intègre-les à ton contexte de reprise.\n\n' + corps, injectees };
+  return { texte: entete + injectees + ' entrée(s) réinjectée(s) ci-dessous' + partiel + ' : intègre-les à ton contexte de reprise.' + bruit + '\n\n' + corps, injectees };
 }
 
 // Prend le drapeau pour UN seul processus, même si dix hooks tournent en parallèle : verrou par création
@@ -148,10 +162,10 @@ memoire.avecEntree(input => {
   if (evt === 'SessionStart') {
     const source = String(input.source || 'compact');
     if (source === 'resume') return;
-    if (AGENT === 'codex' && source !== 'compact' && source !== 'clear') return;
+    if (AGENT !== 'claude' && source !== 'compact' && source !== 'clear') return; // Codex, DeepSeek Harness : demarrage.js sert le démarrage
     if (sid) { try { fs.unlinkSync(drapeau(sid)); } catch (_) { /* pas de drapeau */ } }
     const r = construire(source, cwd);
-    memoire.injecter(AGENT, 'SessionStart', r.texte, 'Historique des 12 dernières heures consulté : ' + r.injectees + ' entrée(s) réinjectée(s)');
+    memoire.injecter(AGENT, 'SessionStart', r.texte, 'Historique des 6 dernières heures consulté : ' + r.injectees + ' entrée(s) réinjectée(s)');
     return;
   }
 

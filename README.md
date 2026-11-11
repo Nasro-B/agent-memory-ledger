@@ -153,7 +153,7 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 | Démarrage d'un sous-agent | crée sa fiche et lui donne sa consigne | |
 | Fin d'un sous-agent | marque son résultat « à traiter » | |
 | Avant compactage | | sauve l'état des dépôts |
-| Après compactage | réinjecte la liste ; note le compactage d'un sous-agent, dont la fiche lui est rendue à son prochain outil | réinjecte les 12 dernières heures |
+| Après compactage | réinjecte la liste ; note le compactage d'un sous-agent, dont la fiche lui est rendue à son prochain outil | réinjecte les 6 dernières heures, sans les entrées automatiques |
 | Fin de session | | entrée « wip » si du travail n'est pas commité |
 
 Tout texte destiné au modèle tient sous 9 000 caractères. Ce qui ne tient pas est coupé avec le chemin du texte complet, jamais en silence. Aucun hook ne bloque l'utilisateur sur une erreur interne, sauf la garde, qui refuse en cas de doute.

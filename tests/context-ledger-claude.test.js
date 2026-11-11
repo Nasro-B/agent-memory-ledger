@@ -2577,3 +2577,141 @@ test('mutation : lignes du tour de nouveau rappelées en fin de tour -> banc rou
   assert.notEqual(r.status, 0, 'la mutation doit rendre un banc rouge :\n' + r.stdout);
   assert.match(r.stdout, /not ok \d+ - fin de tour : une ligne cr..e ou tenue . jour pendant le tour/);
 });
+
+// ---------------------------------------------------------------------------
+// 0.6.0 (0.6.0) : lignes récentes d'abord sous le plafond, lignes sans conversation,
+// messages en copie de secours relus, filet de réinjection après compactage.
+
+const outilSimple = (dir, extra = {}) => hook(dir, Object.assign({
+  hook_event_name: 'PostToolUse', session_id: 'sess-1', cwd: CWD_PROJET, tool_name: 'Bash',
+  tool_input: { command: 'echo bonjour' }, tool_response: { stdout: 'bonjour' },
+}, extra));
+const demarrageCompact = (dir, session = 'sess-1') => hook(dir, { hook_event_name: 'SessionStart', session_id: session, cwd: CWD_PROJET, source: 'compact' });
+
+test('plafond : ce sont les lignes les plus anciennes qui sautent, et c\'est annoncé', () => {
+  const dir = dossier('plafond-recentes');
+  avecRacine(dir, () => {
+    core.lierSession('claude', 'sess-1', CWD_PROJET);
+    for (let i = 0; i < 150; i++) core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: `ligne numero ${i} fin ` + 'x'.repeat(600), de: null, sessionId: 'sess-1' });
+  });
+  const c = contexte(demarrageCompact(dir));
+  assert.ok(c.length <= 9000, `longueur ${c.length}`);
+  assert.match(c, /ligne numero 149 fin /, 'la plus récente est montrée');
+  assert.doesNotMatch(c, /ligne numero 0 fin /, 'la plus ancienne est omise');
+  assert.match(c, /Liste coupée au plafond : ce sont les lignes les plus anciennes qui ne sont pas montrées\./);
+  const annonce = /\((\d+) lignes de plus : /.exec(c);
+  assert.ok(annonce);
+  const montrees = c.split('\n').filter(l => l.startsWith('- '));
+  assert.equal(montrees.length + Number(annonce[1]), 150);
+  assert.ok(montrees.length >= 10, `au moins dix lignes montrées, vu ${montrees.length}`);
+  const numeros = montrees.map(l => Number(/^- C-(\d+)/.exec(l)[1]));
+  assert.deepEqual(numeros, numeros.slice().sort((a, b) => a - b), 'affichage dans l\'ordre habituel');
+  assert.equal(numeros[numeros.length - 1], 150, 'la dernière montrée est la plus récente');
+  assert.equal(numeros[0], 150 - montrees.length + 1, 'les lignes montrées sont les plus récentes, sans trou');
+});
+
+test('plafond : la note d\'une ligne est bornée dans la réinjection, pas dans la vue du fichier', () => {
+  const dir = dossier('note-bornee');
+  let id;
+  avecRacine(dir, () => {
+    core.lierSession('claude', 'sess-1', CWD_PROJET);
+    id = core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: 'ligne à note longue', de: null, sessionId: 'sess-1' });
+    core.changerEtat({ projet: PROJET, agent: 'claude', id, statut: 'en-cours', note: 'DEBUT-NOTE ' + 'n'.repeat(2000) + ' FIN-NOTE' });
+  });
+  const c = contexte(demarrageCompact(dir));
+  assert.match(c, /DEBUT-NOTE/);
+  assert.doesNotMatch(c, /FIN-NOTE/);
+  assert.match(c, /note coupée : lister/);
+  assert.match(vue(dir), /FIN-NOTE/, 'la vue complète garde la note entière');
+});
+
+test('lignes sans conversation : montrées à part aux sessions du projet, jamais celles d\'une autre conversation', () => {
+  const dir = dossier('sans-conversation');
+  let orpheline;
+  avecRacine(dir, () => {
+    core.lierSession('claude', 'sess-1', CWD_PROJET);
+    core.lierSession('claude', 'sess-2', CWD_PROJET);
+    core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: 'travail de la conversation un', de: null, sessionId: 'sess-1' });
+    core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: 'travail de la conversation deux', de: null, sessionId: 'sess-2' });
+    orpheline = core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: 'ligne orpheline trouvée en route', de: null, sessionId: null });
+  });
+  const c = contexte(demarrageCompact(dir));
+  assert.match(c, /Sans conversation \(ajoutées sans --session/);
+  assert.match(c, /ligne orpheline trouvée en route/);
+  assert.match(c, /travail de la conversation un/);
+  assert.doesNotMatch(c, /travail de la conversation deux/);
+  assert.match(c, /1 ligne\(s\) d'autres missions/, 'l\'orpheline n\'est plus comptée dans les autres missions');
+  assert.ok(c.indexOf('Sans conversation') > c.indexOf('travail de la conversation un'), 'après les lignes de la session');
+  // Au message aussi.
+  assert.match(contexte(ups(dir, 'Un nouveau message')), /ligne orpheline trouvée en route/);
+  // Reprise par une autre session : elle a un propriétaire, la première ne la voit plus.
+  const fichierSession = path.join(dir, '.sessions', 'claude-sess-2.json');
+  const s2 = JSON.parse(fs.readFileSync(fichierSession, 'utf8'));
+  s2.reprises = { [PROJET]: [orpheline] };
+  fs.writeFileSync(fichierSession, JSON.stringify(s2, null, 2));
+  const apres = contexte(demarrageCompact(dir));
+  assert.doesNotMatch(apres, /Sans conversation/);
+  assert.doesNotMatch(apres, /ligne orpheline trouvée en route/);
+  assert.match(contexte(demarrageCompact(dir, 'sess-2')), /ligne orpheline trouvée en route/);
+});
+
+test('copie de secours : un message jamais inscrit est redonné à sa session, puis se tait une fois inscrit', () => {
+  const dir = dossier('secours-relu');
+  avecRacine(dir, () => {
+    core.lierSession('claude', 'sess-1', CWD_PROJET);
+    core.lierSession('claude', 'sess-2', CWD_PROJET);
+    core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: 'une ligne quelconque', de: null, sessionId: 'sess-1' });
+    core.secours({ agent: 'claude', sessionId: 'sess-1', promptId: 'p-perdu', texte: 'ORDRE-PERDU refais la page des tarifs en entier', erreur: 'verrou occupé' });
+  });
+  const c = contexte(demarrageCompact(dir));
+  assert.match(c, /gardé\(s\) en copie de secours et jamais inscrit\(s\)/);
+  assert.match(c, /ORDRE-PERDU refais la page des tarifs en entier/);
+  assert.doesNotMatch(contexte(demarrageCompact(dir, 'sess-2')), /ORDRE-PERDU/, 'une autre conversation ne le reçoit pas');
+  const lignes = c.split('\n').filter(l => l.startsWith('- '));
+  assert.ok(!lignes.some(l => /ORDRE-PERDU/.test(l)), 'jamais sous forme de ligne « - »');
+  avecRacine(dir, () => core.ajouterLigne({ projet: PROJET, agent: 'claude', texte: 'ORDRE-PERDU refais la page des tarifs en entier', de: null, sessionId: 'sess-1' }));
+  assert.doesNotMatch(contexte(demarrageCompact(dir)), /copie de secours et jamais inscrit/);
+});
+
+test('filet après compactage : sans SessionStart réussi, le premier outil redonne la liste, une seule fois', () => {
+  const dir = dossier('filet-compactage');
+  preparerLigne(dir);
+  assert.equal(outilSimple(dir).out, '', 'sans compactage : rien');
+  const pc = hook(dir, { hook_event_name: 'PostCompact', session_id: 'sess-1', cwd: CWD_PROJET, trigger: 'auto' });
+  assert.equal(pc.out, '', 'PostCompact n\'injecte rien');
+  assert.doesNotMatch(outilSimple(dir, { agent_id: 'a123' }).out, /Réinjection après compactage|Corriger le bouton/, 'un sous-agent ne prend pas le filet');
+  assert.equal(outilSimple(dir, { session_id: 'sess-2' }).out, '', 'une autre conversation non plus');
+  const r = outilSimple(dir);
+  assert.equal(r.json.hookSpecificOutput.hookEventName, 'PostToolUse');
+  const c = contexte(r);
+  assert.match(c, /^Réinjection après compactage : ce fichier fait foi/);
+  assert.match(c, /Corriger le bouton de paiement/);
+  assert.ok(c.length <= 9000);
+  assert.equal(outilSimple(dir).out, '', 'une seule fois');
+});
+
+test('filet après compactage : SessionStart a déjà redonné la liste, le filet ne la redit pas (dans les deux ordres)', () => {
+  for (const ordre of ['start-puis-postcompact', 'postcompact-puis-start']) {
+    const dir = dossier('filet-' + ordre);
+    preparerLigne(dir);
+    const start = () => assert.match(contexte(demarrageCompact(dir)), /Corriger le bouton de paiement/);
+    const pc = () => hook(dir, { hook_event_name: 'PostCompact', session_id: 'sess-1', cwd: CWD_PROJET, trigger: 'auto' });
+    if (ordre === 'start-puis-postcompact') { start(); pc(); } else { pc(); start(); }
+    assert.equal(outilSimple(dir).out, '', ordre);
+  }
+});
+
+test('filet après compactage : le message de l\'utilisateur reçoit déjà la liste, le drapeau part', () => {
+  const dir = dossier('filet-message');
+  preparerLigne(dir);
+  hook(dir, { hook_event_name: 'PostCompact', session_id: 'sess-1', cwd: CWD_PROJET, trigger: 'auto' });
+  assert.match(contexte(ups(dir, 'Je suis revenu', { prompt_id: 'p-retour' })), /Corriger le bouton de paiement/);
+  assert.equal(outilSimple(dir).out, '');
+});
+
+test('filet après compactage : un PostCompact de sous-agent ne pose pas le drapeau de l\'orchestrateur', () => {
+  const dir = dossier('filet-sous-agent');
+  preparerLigne(dir);
+  hook(dir, { hook_event_name: 'PostCompact', session_id: 'sess-1', cwd: CWD_PROJET, agent_id: 'a123' });
+  assert.equal(outilSimple(dir).out, '');
+});

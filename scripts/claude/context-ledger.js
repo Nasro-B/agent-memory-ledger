@@ -27,6 +27,7 @@
 // UserPromptSubmit n'a pas déjà enregistrés.
 
 const crypto = require('crypto');
+const path = require('path');
 const config = require('../lib/config.js');
 const core = require('../lib/context-ledger-core.js');
 
@@ -75,6 +76,54 @@ function sortir(evenement, texte) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: evenement, additionalContext: core.composerContexte(texte, [], '', '') },
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Filet de réinjection après compactage (version 0.6.0). Avant : la liste ne revenait
+// que par SessionStart(compact) ; si ce hook échouait (verrou occupé, délai dépassé), l'erreur était avalée et
+// rien ne retenait qu'une réinjection était due. Maintenant PostCompact pose un drapeau par session ;
+// SessionStart, quand il a réellement émis la liste, laisse un témoin ; le premier PostToolUse suivant prend
+// le drapeau (suppression atomique : un seul processus) et redonne la liste, sauf si le témoin montre que
+// SessionStart l'a déjà fait pour ce compactage (les deux événements à moins de deux minutes d'écart, dans
+// un ordre ou dans l'autre). Même idée que le drapeau de l'adaptateur Codex.
+const APRES_COMPACTAGE = 'Réinjection après compactage : ce fichier fait foi pour ce qui reste, pas le résumé de compactage.';
+const ECART_TEMOIN_MS = 120000;
+function cheminFilet(sessionId, suffixe) {
+  const s = String(sessionId || '').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 120);
+  return path.join(core.racine(), '.sessions', `reinject-${AGENT}-${s}${suffixe}`);
+}
+function poserDrapeau(sessionId) {
+  if (!sessionId) return;
+  const fs = require('fs');
+  const f = cheminFilet(sessionId, '');
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, new Date().toISOString() + '\n');
+}
+function poserTemoin(sessionId) {
+  if (!sessionId) return;
+  const fs = require('fs');
+  try {
+    const f = cheminFilet(sessionId, '.vu');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, new Date().toISOString() + '\n');
+  } catch (_) { /* au pire la liste sera redite une fois */ }
+}
+// Vrai si une réinjection est due : le drapeau existait, CE processus l'a pris, et SessionStart ne l'a pas déjà servie.
+function reinjectionDue(sessionId) {
+  if (!sessionId) return false;
+  const fs = require('fs');
+  const f = cheminFilet(sessionId, '');
+  let pose = 0;
+  try { pose = fs.statSync(f).mtimeMs; } catch (_) { return false; }
+  try { fs.unlinkSync(f); } catch (_) { return false; } // ancre-mutation:filet-prise-unique
+  let vu = 0;
+  try { vu = fs.statSync(cheminFilet(sessionId, '.vu')).mtimeMs; } catch (_) { vu = 0; }
+  return !(vu && Math.abs(vu - pose) < ECART_TEMOIN_MS); // ancre-mutation:filet-temoin
+}
+// Le message de l'utilisateur reçoit déjà la liste : le drapeau n'a plus lieu d'être.
+function effacerDrapeau(sessionId) {
+  if (!sessionId) return;
+  try { require('fs').unlinkSync(cheminFilet(sessionId, '')); } catch (_) { /* pas de drapeau */ }
 }
 
 function refuser(raison) {
@@ -357,6 +406,7 @@ function surSessionStart(input) {
   sortir('SessionStart', ajuster(
     [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'),
     REGLE_6BIS, core.commandes(SCRIPT, projet, input.session_id).lister)); // ancre-mutation:regle-6bis-session
+  poserTemoin(input.session_id); // la liste vient d'être émise : le filet d'après compactage n'a pas à la redire
 }
 
 // Réponses de l'utilisateur à un questionnaire (outil AskUserQuestion) : ce sont ses décisions, mais elles ne
@@ -417,6 +467,14 @@ function surPostToolUse(input) {
   // Après les preuves : un résultat que cet outil vient de prouver traité n'est plus annoncé.
   const courts = [suivi, suiviEnCours(input)].filter(Boolean).join('\n');
   const enFile = texteMessagesEnFile(file);
+  // Filet d'après compactage : SessionStart n'a pas redonné la liste (échec ou délai), ce premier outil la redonne.
+  if (reinjectionDue(input.session_id)) {
+    const projetFilet = file.projet || core.projetDeSession(AGENT, input.session_id, input.cwd);
+    sortir('PostToolUse', ajuster(
+      [APRES_COMPACTAGE, enFile, courts, core.contexteSession({ agent: AGENT, projet: projetFilet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'),
+      REGLE_6BIS, core.commandes(SCRIPT, projetFilet, input.session_id).lister)); // ancre-mutation:filet-reinjection
+    return;
+  }
   // Liste renvoyée seulement si elle a changé (preuve) ou si un message est arrivé pendant le tour.
   if (!resultat && !enFile) {
     if (courts) sortir('PostToolUse', courts);
@@ -593,7 +651,8 @@ function executerHook(brut) {
   const sousAgent = idSousAgent(input);
   if (sousAgent) { try { surEvenementSousAgent(input, sousAgent); } catch (_) { /* silence */ } return; }
   try {
-    if (evenement === 'UserPromptSubmit') surUserPromptSubmit(input);
+    if (evenement === 'UserPromptSubmit') { surUserPromptSubmit(input); effacerDrapeau(input.session_id); }
+    else if (evenement === 'PostCompact') poserDrapeau(input.session_id); // ne peut rien injecter : le filet servira au premier outil
     else if (evenement === 'SessionStart') surSessionStart(input);
     else if (evenement === 'PostToolUse') surPostToolUse(input);
     else if (evenement === 'Stop') surStop(input);

@@ -18,8 +18,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const AGENTS = ['claude', 'codex'];
-const SIGNATURES = { claude: 'Claude', codex: 'Codex' };
+const AGENTS = ['claude', 'codex', 'deepseek_H'];
+const SIGNATURES = { claude: 'Claude', codex: 'Codex', deepseek_H: 'DeepSeek Harness' };
 
 function maison() {
   const e = process.env.AGENT_MEMORY_LEDGER_HOME;
@@ -38,11 +38,13 @@ function chemins() {
   };
 }
 
-// Agent passé sur la ligne de commande du hook (--agent claude|codex). Jamais lu dans le payload.
+// Agent passé sur la ligne de commande du hook (--agent claude|codex|deepseek_H). Jamais lu dans le payload.
+// La comparaison ignore la casse et rend le nom canonique : « deepseek_H » était mis en minuscules puis cherché
+// tel quel dans la liste, donc jamais trouvé, et aucun script de mémoire ne tournait pour DeepSeek Harness.
 function agentDepuisArgs(argv, defaut) {
   const i = argv.indexOf('--agent');
   const a = (i >= 0 ? String(argv[i + 1] || '') : String(defaut || '')).toLowerCase();
-  return AGENTS.includes(a) ? a : null;
+  return AGENTS.find(x => x.toLowerCase() === a) || null;
 }
 
 // Nom de projet utilisable dans un nom de fichier : lettres, chiffres, « _ », « . », « - ».

@@ -84,5 +84,5 @@ Format, identique pour tous :
 | Fin d'un sous-agent | `context-ledger.js` | marque son résultat « à traiter » |
 | Avant compactage | `memoire/avant-compactage.js` | sauve l'état des dépôts |
 | Après compactage | `context-ledger.js` | note le compactage d'un sous-agent ; Codex : programme la réinjection de la liste |
-| Après compactage | `memoire/rappel.js` | réinjecte les 12 dernières heures |
+| Après compactage | `memoire/rappel.js` | réinjecte les 6 dernières heures, sans les entrées automatiques |
 | Fin de session | `memoire/fin-session.js` | entrée « wip » si du travail n'est pas commité |
