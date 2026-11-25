@@ -47,7 +47,8 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
 - Sous-agents : chaque sous-agent lancé reçoit une ligne `[agent]`, marquée « TERMINÉ, résultat à traiter » à
   sa fin. Sa fin est annoncée au prochain outil, puis rappelée toutes les 20 minutes pendant un tour long :
   ne pas attendre la fin du tour. Lire le résultat, le vérifier, l'intégrer, puis citer `[ctx C-NNNN]`. Sinon,
-  dire à l'utilisateur lequel reste et pourquoi.
+  dire à l'utilisateur lequel reste et pourquoi. Un sous-agent que tu relances après la clôture de sa ligne est
+  suivi par une nouvelle ligne, créée à la relance (Claude Code) : ne l'inscris pas toi-même.
 - Un sous-agent fini dont le résultat n'est pas prouvé traité t'est redit en entier (avec le chemin de son
   résultat) à chaque nouveau message de l'utilisateur, au démarrage, à la reprise, avec la liste redonnée après
   un compactage et à l'arrivée de son rapport : un rappel, pas un nouveau travail. Le rapport de fin d'un

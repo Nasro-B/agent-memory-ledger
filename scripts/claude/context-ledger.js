@@ -176,6 +176,8 @@ function messageHumainEnFile(ligne) {
     }).filter(Boolean).join('\n');
   }
   if (!texte.trim()) return null;
+  // Jamais un message de l'utilisateur : un texte de machine ou le message d'un autre agent, même mis en file.
+  if (core.texteDeMachine(texte) || core.expediteurMessageAgent(texte)) return null;
   const id = a.source_uuid || o.uuid || crypto.createHash('sha1').update(String(a.timestamp || '') + texte).digest('hex').slice(0, 16);
   return { cle: 'file:' + id, texte, ts: Date.parse(a.timestamp || o.timestamp) || 0 };
 }
@@ -277,6 +279,16 @@ function tacheLancee(input) {
   return null;
 }
 
+// Sous-agent déjà suivi que cet appel d'outil fait repartir : l'outil d'envoi de message à un agent
+// (SendMessage) répond { success, message: 'Resuming agent ...', resumedAgentId }. Un message envoyé à un agent
+// encore en train de tourner ne porte pas resumedAgentId : ce n'est pas une relance.
+function tacheRelancee(input) {
+  if (input.tool_name !== 'SendMessage') return null;
+  let tr = input.tool_response;
+  if (typeof tr === 'string') { try { tr = JSON.parse(tr); } catch (_) { return null; } }
+  return tr && typeof tr === 'object' && tr.resumedAgentId ? String(tr.resumedAgentId) : null;
+}
+
 // Fin d'une tâche suivie. reprise = true seulement pour un événement reçu en direct (SubagentStop) : le
 // transcript et les tours de notification peuvent revoir une fin déjà traitée.
 function marquerFin(input, id, statut, reprise = false) {
@@ -357,7 +369,12 @@ function surUserPromptSubmit(input) {
   // marquée ; tout ce qui attend est redit.
   const expediteur = core.expediteurMessageAgent(prompt);
   if (expediteur) { // ancre-mutation:agent-message-non-enregistre
-    try { marquerFin(input, expediteur, 'terminé'); } catch (_) { /* rappelé en fin de tour */ }
+    // Un rapport reçu est une livraison en direct, identifiée par son tour et son texte : si la ligne du
+    // sous-agent est déjà close (il a été relancé sans que la relance soit vue), une nouvelle ligne le suit.
+    try {
+      core.finirTache({ agent: AGENT, sessionId: input.session_id, id: expediteur, statut: 'terminé', reprise: true, // ancre-mutation:rapport-nouvelle-livraison
+        livraisonId: 'rapport:' + (input.prompt_id || ''), dernierMessage: empreinte(prompt) });
+    } catch (_) { /* rappelé en fin de tour */ }
     let file = { ids: [], messages: [], echecs: [], projet: null };
     try { file = rattraperMessagesEnFile(input); } catch (_) { /* rien */ }
     sortir('UserPromptSubmit', [texteMessagesEnFile(file), suiviEnCours(input, true)].filter(Boolean).join('\n')); // ancre-mutation:rappel-force-rapport
@@ -475,6 +492,16 @@ function surPostToolUse(input) {
       if (l) suivi = `Fichier contexte : ${lancee.genre === 'workflow' ? 'workflow' : 'sous-agent'} « ${lancee.titre.replace(/\s+/g, ' ').slice(0, 90)} » suivi par ${l}. À sa fin, son résultat devra être lu, vérifié et intégré ; la ligne ne se retire que sur preuve ([ctx ${l}] dans l'historique).`;
     } catch (e) {
       suivi = `Fichier contexte : le sous-agent « ${lancee.titre.slice(0, 90)} » (${lancee.id}) n'a PAS pu être inscrit (${e && e.message ? e.message : e}) : inscris-le toi-même avec la commande ajouter.`;
+    }
+  }
+  // Sous-agent déjà suivi que ce message fait repartir : suivi de nouveau, sa prochaine fin sera une livraison.
+  const relancee = tacheRelancee(input);
+  if (relancee) {
+    try {
+      const r = core.relancerTache({ agent: AGENT, sessionId: input.session_id, id: relancee }); // ancre-mutation:relance-suivie
+      if (r) suivi = `Fichier contexte : sous-agent « ${r.titre} » relancé, suivi par ${r.ligne}${r.nouvelle ? ' (nouvelle ligne : la précédente était close)' : ''}. À sa fin, son nouveau résultat devra être lu, vérifié et intégré ; la ligne ne se retire que sur preuve ([ctx ${r.ligne}] dans l'historique).`;
+    } catch (e) {
+      suivi = `Fichier contexte : la relance du sous-agent ${relancee} n'a PAS pu être inscrite (${e && e.message ? e.message : e}) : inscris-la toi-même avec la commande ajouter.`;
     }
   }
   const p = core.preuvesDepuisOutil({

@@ -56,7 +56,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Workflow|AskUserQuestion",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Workflow|AskUserQuestion|SendMessage",
         "hooks": [
           {
             "type": "command",

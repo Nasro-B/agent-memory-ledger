@@ -95,6 +95,9 @@
  *
  * Livraisons des sous-agents (une ligne de travail par sous-agent lancé, gardée jusqu'à la preuve)
  *   suivreTache({agent, sessionId, cwd, tache:{id, genre, titre, resultat, alias}}) -> 'C-NNNN'|null
+ *   relancerTache({agent, sessionId, id}) -> {ligne, nouvelle, titre}|null   un sous-agent déjà suivi est relancé (message
+ *        qui le fait repartir) : suivi comme un lancement, nouvelle ligne si la précédente est close ; sa fin suivante,
+ *        même sans identifiant ni texte, est une nouvelle livraison (le rang de la relance entre dans son identité)
  *   finirTache({agent, sessionId, id, statut, resultat, reprise}) -> tâche à traiter|null
  *   livraisons({agent, sessionId}) -> {attente, enCours}
  *   tacheParAlias(agent, sessionId, alias) -> id|null
@@ -1679,10 +1682,45 @@ function suivreTacheSousVerrou({ agent, sessionId, cwd, tache }) {
 //    été relancé et a rendu un nouveau résultat) : une nouvelle ligne ; un filet qui relit une trace
 //    (transcript) passe reprise = false, car il peut revoir la fin déjà traitée ;
 //  - tâche inconnue (lancée avant l'activation, ou par un sous-agent) : ignorée.
-function identiteLivraison({ livraisonId, resultat, dernierMessage }) {
+function identiteLivraison({ livraisonId, resultat, dernierMessage, relances }) {
   // Un rapport different peut etre remis dans le meme tour du parent.
   // Sans ID ni texte final, le chemin seul est conservateur : sa date ne prouve pas une nouvelle fin.
-  return hashCourt(JSON.stringify([chaine(livraisonId), chaine(resultat), chaine(dernierMessage)]));
+  const base = [chaine(livraisonId), chaine(resultat), chaine(dernierMessage)];
+  // Après une relance connue (relancerTache), une fin sans identifiant ni texte final est quand même une NOUVELLE
+  // fin : le rang de la relance entre dans l'identité. Sans relance, l'identité d'avant, inchangée.
+  return hashCourt(JSON.stringify(relances ? [...base, relances] : base)); // ancre-mutation:livraison-relance-identite
+}
+
+// Relance d'un sous-agent déjà suivi : l'orchestrateur lui envoie un message qui le fait repartir. Un sous-agent
+// relancé après la clôture de sa ligne rendait un second rapport et rien ne le suivait : sa fin arrive sans
+// identifiant ni texte final, son identité était donc celle de sa fin précédente, déjà vue, et elle était écartée.
+// La relance est maintenant suivie comme un lancement : si la ligne précédente est close, une nouvelle ligne est
+// créée tout de suite (« agent en cours ») ; sinon la ligne en place repasse « en cours ». Retourne
+// { ligne, nouvelle, titre }, ou null pour une tâche inconnue.
+function relancerTacheSousVerrou({ agent, sessionId, id }) {
+  validerAgent(agent);
+  const cle = chaine(id);
+  const s = lireSession(agent, sessionId);
+  const t = s && estObjet(s.taches) && s.taches[cle];
+  if (!t) return null;
+  let close = false;
+  try { const l = lireLedger(t.projet, agent).lignes[t.ligne]; close = !l || TERMINAUX.includes(l.statut); } catch (_) { return null; }
+  let ligne = t.ligne;
+  if (close) {
+    const texte = `[agent] « ${t.titre} » (${t.genre}, ${cle}) : relancé après la clôture de ${t.ligne} ; à sa fin, lire son nouveau résultat, le vérifier et l'intégrer.`;
+    ligne = reessayer(() => ajouterLigne({ projet: t.projet, agent, texte, de: null, sessionId })); // ancre-mutation:livraison-relance
+  }
+  try { reessayer(() => changerEtat({ projet: t.projet, agent, id: ligne, statut: 'en-cours', note: `agent relancé depuis ${dateLocale()}` })); } catch (_) { /* la ligne existe : seul l'état manque */ }
+  reessayer(() => modifierSession(agent, sessionId, x => {
+    const y = estObjet(x.taches) && x.taches[cle];
+    if (y) Object.assign(y, { ligne, fini: null, clos: null, annonce: null, relance: maintenantIso(), relances: (Number.isInteger(y.relances) ? y.relances : 0) + 1 });
+  }));
+  return { ligne, nouvelle: close, titre: t.titre };
+}
+
+function relancerTache(args) {
+  if (!args.sessionId || !chaine(args.id)) return null;
+  return avecVerrou(cheminSession(args.agent, args.sessionId) + '.tache-' + hashCourt(chaine(args.id)), () => relancerTacheSousVerrou(args));
 }
 
 function finirTache(args) {
@@ -1699,7 +1737,7 @@ function finirTacheSousVerrou({ agent, sessionId, id, statut, resultat, reprise,
   if (t.fini && !reprise) return null; // relecture d'une trace, jamais une nouvelle livraison
   const st = chaine(statut) || 'terminé';
   const res = chaine(resultat) || chaine(t.resultat);
-  const identite = identiteLivraison({ livraisonId, resultat: res, dernierMessage });
+  const identite = identiteLivraison({ livraisonId, resultat: res, dernierMessage, relances: t.relances });
   if ((t.livraisonsVues || []).includes(identite)) return null;
   // Migration prudente : une fin deja connue sans identite ne rouvre pas sa ligne.
   if (t.fini && !t.livraisonId) {
@@ -4289,7 +4327,7 @@ module.exports = {
   ajouterDemande, ajouterLigne, classerSansTravail, changerEtat, abandonner, trouverProjetDe,
   lireSession, modifierSession, lierSession, projetDeSession, enregistrerMessage, rappelStop,
   secours, contexteEchecMessage, lireLignesDepuis, suiteTranscript,
-  suivreTache, finirTache, livraisons, tacheParAlias, texteLivraisons, texteFins, texteSuiviEnCours,
+  suivreTache, finirTache, relancerTache, livraisons, tacheParAlias, texteLivraisons, texteFins, texteSuiviEnCours,
   signalerAgent, texteSignalementsAgents, texteSignalementsEnAttente, lireBoite,
   creerFiche, lireFiche, lireIndexFiche, noterFiche, chercher, MISSION_ABSENTE,
   texteConsigneSousAgent, consigneADonner, consigneDansTranscript, texteRepriseSousAgent, texteLectureSeule, compactageDuSousAgent, noterCompactage,

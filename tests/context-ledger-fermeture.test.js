@@ -392,9 +392,10 @@ test('hook : sous-agent fini : son rapport ne reçoit pas de numéro M, et son r
   const rapport = message('p-rapport', '<agent-message from="ag-force-1">\n[Subagent hand-back] The text below is the final report of a subagent.\n  fait : le lot du panier');
   assert.equal(Object.keys(ledger().demandes).length, avant, 'le rapport d\'un sous-agent ne doit jamais devenir un message de l\'utilisateur');
   assert.doesNotMatch(rapport.texte, /Nouveau message M-/);
-  assert.match(rapport.texte, rappel);
-  // Le message d'un agent inconnu (autre session) : pas un message de l'utilisateur non plus.
-  message('p-autre', '<agent-message from="session-inconnue">\nbonjour');
+  assert.match(rapport.texte, new RegExp(`Sous-agent\\(s\\) terminé\\(s\\), résultat à traiter : ${ligne} « lot du panier » \\(résultat : rapports/resultat-du-lot\\.jsonl\\)`), 'le rapport reçu est une livraison : elle est annoncée');
+  // Le message d'un agent inconnu (autre session) : pas un message de l'utilisateur non plus. Il ne suit aucune
+  // tâche, mais un message d'agent qui arrive redit ce qui attend déjà.
+  assert.match(message('p-autre', '<agent-message from="session-inconnue">\nbonjour').texte, rappel);
   assert.equal(Object.keys(ledger().demandes).length, avant);
   // La notification de fin d'une autre tâche de fond (une commande, un agent inconnu) : pas un message de l'utilisateur,
   // et pas de rappel non plus (chaque commande de fond qui finit ne doit pas redire toute la liste).
@@ -422,6 +423,53 @@ test('hook : sous-agent fini : son rapport ne reçoit pas de numéro M, et son r
   // Résultat prouvé traité : plus rien à rappeler.
   assert.deepEqual(avecRacine(dir, () => core.appliquerPreuves({ agent: AGENT, marqueurs: [{ id: ligne, partiel: false }], preuve: 'fichier h.md' })).faits, [ligne]);
   assert.doesNotMatch(message('p-4', 'dernier message').texte, /TERMINÉ\(S\)/, 'une ligne fermée sur preuve n\'est plus rappelée');
+});
+
+// Un sous-agent relancé après la clôture de sa ligne a rendu un second rapport, et rien ne l'a suivi (sa fin
+// arrive sans identifiant ni texte final : même identité que sa fin précédente).
+test('hook : sous-agent relancé après la clôture de sa ligne : la relance est suivie, sa fin est une livraison ; sans relance vue, son rapport en est une', () => {
+  const dir = dossier('relance');
+  const session = 'sess-relance';
+  const base = { session_id: session, cwd: CWD_PROJET };
+  hook(dir, { ...base, hook_event_name: 'SessionStart', source: 'startup' });
+  const id = 'ag-relance-1';
+  const ledger = () => avecRacine(dir, () => core.lireLedger(PROJET, AGENT));
+  const lignes = () => Object.keys(ledger().lignes);
+  const l1 = avecRacine(dir, () => core.suivreTache({ agent: AGENT, sessionId: session, cwd: CWD_PROJET, tache: { id, genre: 'general-purpose', titre: 'lot du panier', resultat: 'rapports/sortie.jsonl' } }));
+  // Fin telle qu'elle arrive pour un sous-agent qui rend son rapport par l'outil de remise : ni identifiant ni texte.
+  const fin = () => hook(dir, { ...base, hook_event_name: 'SubagentStop', agent_id: id, agent_type: 'general-purpose' });
+  const outil = extra => hook(dir, { ...base, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {}, ...extra });
+  const fermer = l => assert.deepEqual(avecRacine(dir, () => core.appliquerPreuves({ agent: AGENT, marqueurs: [{ id: l, partiel: false }], preuve: 'fichier h.md' })).faits, [l]);
+  fin();
+  assert.match(outil().texte, new RegExp(`Sous-agent\\(s\\) terminé\\(s\\), résultat à traiter : ${l1} `));
+  fermer(l1);
+  // Un message envoyé à un agent qui tourne encore (pas de resumedAgentId) n'est pas une relance.
+  outil({ tool_name: 'SendMessage', tool_input: { to: id, message: 'précision' }, tool_response: { success: true, message: 'Message queued' } });
+  assert.deepEqual(lignes(), [l1]);
+  // La relance (SendMessage qui fait repartir l'agent) est suivie comme un lancement : nouvelle ligne, tout de suite.
+  const relance = outil({ tool_name: 'SendMessage', tool_input: { to: id, message: 'continue avec le lot suivant' }, tool_response: { success: true, message: 'Resuming agent', resumedAgentId: id } });
+  assert.equal(lignes().length, 2, 'une nouvelle ligne suit le sous-agent relancé');
+  const l2 = lignes().find(x => x !== l1);
+  assert.match(relance.texte, new RegExp(`sous-agent « lot du panier » relancé, suivi par ${l2} \\(nouvelle ligne`));
+  assert.equal(ledger().lignes[l2].statut, 'en-cours');
+  assert.match(ledger().lignes[l2].texte, new RegExp(`relancé après la clôture de ${l1}`));
+  // Sa fin, toujours sans identifiant ni texte, est maintenant une livraison : marquée, puis annoncée.
+  fin();
+  assert.match(ledger().lignes[l2].note, /^TERMINÉ/);
+  assert.match(outil().texte, new RegExp(`Sous-agent\\(s\\) terminé\\(s\\), résultat à traiter : ${l2} `));
+  fermer(l2);
+  // Relance que le hook n'a pas vue (faite par l'utilisateur lui-même) : le rapport reçu suffit à créer la ligne.
+  const avant = Object.keys(ledger().demandes).length;
+  const prompt = `<agent-message from="${id}">\n[Subagent hand-back] The text below is the final report of a subagent.\n  second lot fait`;
+  const rapport = hook(dir, { ...base, hook_event_name: 'UserPromptSubmit', prompt_id: 'p-rapport-2', prompt });
+  assert.equal(Object.keys(ledger().demandes).length, avant, 'toujours aucun numéro M');
+  assert.equal(lignes().length, 3, 'le rapport d\'un sous-agent dont la ligne est close crée une nouvelle ligne');
+  const l3 = lignes().find(x => x !== l1 && x !== l2);
+  assert.match(rapport.texte, new RegExp(`Sous-agent\\(s\\) terminé\\(s\\), résultat à traiter : ${l3} `));
+  // Le même rapport relu ne crée rien de plus ; le rapport d'un agent inconnu non plus.
+  hook(dir, { ...base, hook_event_name: 'UserPromptSubmit', prompt_id: 'p-rapport-2', prompt });
+  hook(dir, { ...base, hook_event_name: 'UserPromptSubmit', prompt_id: 'p-rapport-3', prompt: '<agent-message from="ag-inconnu">\nbonjour' });
+  assert.equal(lignes().length, 3);
 });
 
 // ---------------------------------------------------------------------------
@@ -462,7 +510,7 @@ function relancer(hookCopie, motif) {
 }
 
 test('mutation : mentions, commits lus (dossiers, sortie), commit sans mention, partiels, textes de machine, sous-agents, conseils de « ajouter », temporaires -> banc rouge', { skip: EN_MUTATION }, () => {
-  const motif = '^(texte de machine|hook : un texte de machine|mention complète|commit|hook : après un commit|preuves partielles|fichiers temporaires|hook : le commit d un sous-agent|ajouter : un message entier|message d.agent|hook : sous-agent fini)';
+  const motif = '^(texte de machine|hook : un texte de machine|mention complète|commit|hook : après un commit|preuves partielles|fichiers temporaires|hook : le commit d un sous-agent|ajouter : un message entier|message d.agent|hook : sous-agent fini|hook : sous-agent relancé)';
   const temoin = relancer(copie('temoin-fermeture'), motif);
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
   const NOYAU = 'lib/context-ledger-core.js';
@@ -494,6 +542,11 @@ test('mutation : mentions, commits lus (dossiers, sortie), commit sans mention, 
     ['rappel-force-rapport', '    sortir(\'UserPromptSubmit\', [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join(\'\\n\')); // MUTATION : le rapport ne redit pas ce qui attend', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
     ['rappel-force-filet', '  const courts = [suivi, commitNu, suiviEnCours(input)].filter(Boolean).join(\'\\n\'); // MUTATION : la liste redonnée après un compactage ne redit pas le sous-agent fini', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
     ['rappel-force-demarrage', '    [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join(\'\\n\'), // MUTATION : le démarrage ne redit pas le sous-agent fini', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
+    // Relance d'un sous-agent après la clôture de sa ligne.
+    ['livraison-relance-identite', '  return hashCourt(JSON.stringify(base)); // MUTATION : le rang de la relance n\'entre plus dans l\'identité de la fin', /not ok \d+ - hook : sous-agent relancé/, NOYAU, '^hook : sous-agent relancé'],
+    ['livraison-relance', '    ligne = t.ligne; // MUTATION : la relance ne crée pas de nouvelle ligne', /not ok \d+ - hook : sous-agent relancé/, NOYAU, '^hook : sous-agent relancé'],
+    ['relance-suivie', '      const r = null; // MUTATION : la relance n\'est pas suivie', /not ok \d+ - hook : sous-agent relancé/, ADAPTATEUR, '^hook : sous-agent relancé'],
+    ['rapport-nouvelle-livraison', '      core.finirTache({ agent: AGENT, sessionId: input.session_id, id: expediteur, statut: \'terminé\', reprise: false, // MUTATION : le rapport reçu n\'est plus une livraison en direct', /not ok \d+ - hook : sous-agent relancé/, ADAPTATEUR, '^hook : sous-agent relancé'],
     ['chemin-du-resultat', '  const liste = etat.attente.slice(0, MAX_LIVRAISONS).map(t => `${t.ligne} « ${t.titre} »`).join(\' ; \'); // MUTATION : le rappel ne donne pas le chemin du résultat', /not ok \d+ - hook : sous-agent fini/, NOYAU, '^hook : sous-agent fini'],
   ];
   for (const [ancre, remplacement, rouge, fichier, seul] of mutations) {
