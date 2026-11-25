@@ -408,7 +408,7 @@ test('installateur Codex : montre sans écrire, ajoute en fin d\'événement san
   const commandes = Object.values(apres.hooks).flat().flatMap(g => g.hooks.map(h => h.command));
   const nouvelles = commandes.filter(c => c.includes(racine + '/scripts/'));
   assert.ok(nouvelles.length >= 15, 'hooks ajoutés : ' + nouvelles.length);
-  assert.ok(nouvelles.every(c => !c.includes('{{') && /^node "[^"]+\.js"( --agent codex)?$/.test(c)), 'chemins absolus, entre guillemets');
+  assert.ok(nouvelles.every(c => !c.includes('{{') && /^node "[^"]+\.js"( --stop)?( --agent codex)?$/.test(c)), 'chemins absolus, entre guillemets');
   for (const evt of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop', 'SubagentStart', 'SubagentStop']) {
     assert.ok((apres.hooks[evt] || []).some(g => g.hooks.some(h => h.command.includes('/scripts/'))), 'événement branché : ' + evt);
   }
@@ -445,7 +445,7 @@ test('plugin : les hooks déclarés pour Claude Code et pour Codex appellent des
   let n = 0;
   for (const [cfg, jeton] of [[claude, '${CLAUDE_PLUGIN_ROOT}'], [codex, '{{RACINE}}']]) {
     for (const groupes of Object.values(cfg.hooks)) for (const g of groupes) for (const h of g.hooks) {
-      const mm = /^node "([^"]+)"( --agent (claude|codex))?$/.exec(h.command);
+      const mm = /^node "([^"]+)"( --stop)?( --agent (claude|codex))?$/.exec(h.command);
       assert.ok(mm && mm[1].startsWith(jeton + '/scripts/'), 'commande inattendue : ' + h.command);
       assert.ok(fs.existsSync(path.join(racine, mm[1].slice(jeton.length))), 'script absent : ' + h.command);
       assert.ok(Number.isInteger(h.timeout) && h.timeout > 0, 'délai explicite : ' + h.command);

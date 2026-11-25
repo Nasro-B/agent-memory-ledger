@@ -12,6 +12,8 @@ Un agent de code oublie de cinq façons. Ce dépôt les ferme une par une, avec 
 | La mission d'un sous-agent, quand SON contexte est compacté | Chaque sous-agent a sa fiche sur disque : sa mission mot pour mot et les notes qu'il y ajoute. Elle lui est rendue après un compactage de son contexte : c'est elle qui fait foi, pas le résumé. Avec Claude Code le hook copie la mission ; avec Codex, qui la chiffre, c'est à l'agent principal ou au sous-agent de l'y copier. La mission prime : si elle interdit toute écriture ailleurs que dans ses livrables, la fiche reste vide. |
 | Ce qui a été fait hier, par cet agent ou par un autre | Chaque commit est journalisé, l'état des dépôts est sauvé avant un compactage, et l'historique récent est réinjecté après. |
 
+Depuis la 0.8.0, le dépôt apporte aussi trois gardes (voir [Gardes](#gardes)) : une garde de sécurité des commandes (refuse les commandes destructrices, demande confirmation pour une poussée ou un déploiement de production), un rappel avant commit (un commit qui touche une migration, une fonction déployée à part, une variable d'environnement ou une tâche planifiée est refusé tant que l'agent n'a pas confirmé l'action réelle) et une garde des caractères invisibles. Elles sont actives par défaut et se règlent dans `gardes.json`.
+
 ## Comment ça marche
 
 ```
@@ -133,6 +135,7 @@ Dans `~/.agent-memory-ledger`, jamais dans vos dépôts. Pour un autre emplaceme
 | `CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN` | délai, en minutes, du rappel en cours de tour des résultats de sous-agents non traités (défaut : 20) |
 | `CONTEXT_LEDGER_BUDGET_MS` | budget de temps d'un hook de la liste de travail, en millisecondes, démarrage de node compris. À poser seulement si vous changez les délais des hooks : gardez-le sous le plus court (voir « Délais ») |
 | `AML_DELAI_VERROU_MS` | délai, en millisecondes, d'attente du verrou des écritures de mémoire (défaut : 5000). Sert aux bancs ; il n'y a aucune raison d'y toucher |
+| `AML_GARDES_SCRIPTS`, `AML_GARDES_EN_MUTATION`, `AML_GARDES_BASE_TESTS` | bancs seulement : dossier `scripts/` à tester, drapeau d'une exécution sur une copie mutée, dossier de travail des bancs des gardes. Ne jamais les poser |
 | `AML_PANNE_TEST` | bancs seulement : `apres-premiere-ecriture` interrompt une transaction de mémoire après son premier fichier, pour prouver qu'elle est rejouée. Ne jamais le poser |
 | `CONTEXT_LEDGER_SHELL` | shell dans lequel Codex lance ses commandes : `powershell` ou `bash`. Codex ne le dit pas aux hooks ; sans cette variable, la garde suppose PowerShell sous Windows et un shell POSIX ailleurs. À poser seulement si votre installation diffère (voir « Limites connues », garde) |
 
@@ -143,6 +146,8 @@ Dans `~/.agent-memory-ledger`, jamais dans vos dépôts. Pour un autre emplaceme
 ```
 
 Le motif est une expression régulière appliquée au chemin ; le premier qui correspond gagne. Un dépôt situé sous le dossier temporaire du système n'est pas pris pour un projet, sauf si la table le nomme. Hors de tout projet, la liste de travail range tout dans `_general`, et les hooks de mémoire ne font rien.
+
+**Gardes.** Le réglage des trois gardes est dans `gardes.json`, dans la maison, facultatif (voir [Gardes](#gardes)).
 
 ## Ce que font les hooks
 
@@ -159,7 +164,16 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 | Après compactage | réinjecte la liste (avec les sous-agents finis non traités) ; note le compactage d'un sous-agent, dont la fiche lui est rendue à son prochain outil | réinjecte les 6 dernières heures, sans les entrées automatiques |
 | Fin de session | | entrée « wip » si du travail n'est pas commité |
 
-Tout texte destiné au modèle tient sous 9 000 caractères. Ce qui ne tient pas est coupé avec le chemin du texte complet, jamais en silence. Aucun hook ne bloque l'utilisateur sur une erreur interne, sauf la garde, qui refuse en cas de doute.
+Hooks des gardes (en plus du tableau ci-dessus) :
+
+| Événement | Garde | Claude Code | Codex |
+| --- | --- | --- | --- |
+| Avant un outil de shell | sécurité des commandes et rappel avant commit (`scripts/gardes/securite.js --agent <agent>`) | `Bash`, `PowerShell` ; délai 30 s | tous les outils (seuls ceux qui portent une commande sont jugés : champs `command`, `cmd`, `script` ou `input`) ; délai 30 s |
+| Avant une écriture ou une commande | caractères invisibles (`scripts/gardes/caracteres.js`) | `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell` ; délai 10 s | tous les outils ; délai 15 s |
+| Fin de tour | réponse sans caractère invisible (`scripts/gardes/caracteres.js --stop --agent <agent>`) | délai 10 s | délai 15 s |
+| `git commit` (hook git natif) | rappel avant commit, quel que soit l'outil (`scripts/gardes/checklist-hook-git.js`) | à installer dans le dépôt | à installer dans le dépôt |
+
+Tout texte destiné au modèle tient sous 9 000 caractères. Ce qui ne tient pas est coupé avec le chemin du texte complet, jamais en silence. Aucun hook ne bloque l'utilisateur sur une erreur interne, sauf la garde de la liste de travail et la garde de sécurité (avec le rappel avant commit), qui refusent en cas de doute ; la garde des caractères laisse passer quand son entrée est illisible.
 
 ### Délais
 
@@ -169,6 +183,7 @@ Sur une machine saturée, le démarrage de node suffit à dépasser dix secondes
 
 ### Mise à jour depuis une version précédente
 
+- **0.8.0, les trois gardes sont actives dès la mise à jour.** Pour en désactiver une, créez `gardes.json` dans la maison (`~/.agent-memory-ledger`, ou `AGENT_MEMORY_LEDGER_HOME`) : `{ "securite": { "actif": false } }`, `{ "checklist": { "actif": false } }` ou `{ "caracteres": { "actif": false } }`, ensemble ou séparément. Sans ce fichier rien n'est à faire. Seul un `false` écrit comme tel éteint une garde : un fichier illisible, ou une valeur autre qu'un booléen, laisse les gardes actives avec leurs valeurs par défaut, et elles le disent. Le rappel avant commit refuse aussi un commit qui touche une migration, une fonction déployée à part, une variable d'environnement lue par le code ou une tâche planifiée : si vous ne voulez pas de ce rappel, éteignez-le, ou retirez les catégories qui ne vous concernent pas (voir [Gardes](#gardes)). Codex : `node scripts/installer-codex.js --appliquer` ajoute les nouveaux hooks, puis approuvez-les dans Codex.
 - 0.7.0, liste de travail : la mention complète n'est plus annulée par un mot de travail non fini d'une autre proposition de la ligne (et « non terminée », « à vérifier » avec accent ou au féminin sont reconnus) ; un commit est lu après `Set-Location`, `cd` ou `$d = '...'; git -C $d`, et un commit fait par un script est lu par la ligne que git écrit ; un commit sans mention est dit tout de suite ; les preuves « partiel » sont comptées et rappelées toutes les cinq ; le commit d'un sous-agent est annoncé à l'agent principal sans rien fermer ; la demande de message suggéré de Codex n'est plus un message de l'utilisateur ; `ajouter` avertit d'une ligne qui porte plusieurs travaux, d'une réponse de questionnaire ou d'une consigne ; les fichiers temporaires d'écritures interrompues de plus d'une heure sont retirés au démarrage ; le rapport de fin d'un sous-agent, que l'application remet comme un tour de l'utilisateur (balise `agent-message`), ne reçoit plus de numéro M, et suit une nouvelle ligne si celle du sous-agent est close ; un sous-agent relancé après la clôture de sa ligne est suivi de nouveau (Claude Code : le hook d'après outil écoute aussi l'envoi de message à un agent, `SendMessage`), au lieu de voir son second rapport écarté ; un sous-agent fini dont le résultat n'est pas prouvé traité est redit en entier, avec le chemin de son résultat, à chaque nouveau message de l'utilisateur, au démarrage, à la reprise, avec la liste redonnée après un compactage et à l'arrivée d'un rapport (jamais sur un simple outil) ; la garde de lecture des sous-agents analyse les scripts de lecture (boucles, affectations, méthodes de lecture, `git` en lecture) ; la copie de secours est asynchrone (un travailleur détaché la fait ; `CONTEXT_LEDGER_SECOURS_SYNCHRONE=1` rend l'ancien comportement). Mémoire : les écritures du journal et du résumé passent sous un verrou, par remplacement atomique, et en une transaction rejouée si elle est interrompue ; le démarrage rappelle les 25 entrées les plus récentes par horodatage (et non les 25 premières lignes) ; le marqueur de travail non documenté compte les éditions et les fichiers distincts, et ignore une écriture échouée ; un point de contrôle ou un état avant compactage n'est écrit qu'une fois par minute. Rien à refaire : les fichiers existants restent lisibles (un marqueur ancien, sans liste de fichiers, s'affiche « fichiers distincts inconnus »).
 - Claude Code : mettez le plugin à jour ; les deux nouveaux hooks (démarrage d'un sous-agent, après compactage) sont actifs à la session suivante.
 - Codex : l'installateur ne modifie jamais un hook déjà en place, vos anciens délais (10 secondes) restent donc. Pour prendre les nouveaux : `node scripts/installer-codex.js --retirer --appliquer`, puis `node scripts/installer-codex.js --appliquer`, et approuvez de nouveau les hooks dans Codex. Si vous gardez les anciens délais, posez `CONTEXT_LEDGER_BUDGET_MS=8000` dans l'environnement où tourne Codex.
@@ -176,6 +191,116 @@ Sur une machine saturée, le démarrage de node suffit à dépasser dix secondes
 ### Diagnostic
 
 Pour connaître la forme et la durée réelles des événements que vos agents envoient aux hooks, créez un fichier vide nommé `actif` dans le dossier `agent-memory-ledger/capture-hooks` du dossier temporaire du système. Chaque hook de la liste de travail y ajoute alors une ligne dans `claude.jsonl` ou `codex.jsonl` : nom de l'événement, noms des champs reçus, identifiants, chemins, durée. Le contenu n'y est pas écrit (ni message, ni commande, ni réponse), à une exception près : pour un outil qui lance un sous-agent, la longueur et les 24 premiers caractères de quelques champs, ce qui suffit à voir si la mission arrive en clair ou chiffrée. Pour les autres outils, la ligne porte la forme de l'entrée, jamais sa valeur : noms des champs, type de la commande (texte, ou programme et options quand elle arrive en tableau) et shell s'il est nommé. Chaque hook y écrit aussi, dès son début, une ligne courte dans `claude.debuts.jsonl` ou `codex.debuts.jsonl` : un début sans fin au même numéro de processus est un hook tué par son délai, une absence des deux un hook jamais lancé. Supprimez le fichier `actif` pour arrêter.
+
+## Gardes
+
+Trois gardes protègent la machine et le dépôt de l'utilisateur, par opposition à la liste de travail qui protège la mémoire. Elles sont **actives par défaut**, sans fichier de réglage, avec des valeurs sûres et neutres. Elles sont branchées dans les hooks de Claude Code (`hooks/hooks.json`) et dans le modèle de hooks de Codex (`codex/hooks.modele.json`).
+
+### Sécurité des commandes (`scripts/gardes/securite.js`)
+
+Hook avant un outil de shell. Toutes les règles trouvées dans une commande sont rapportées d'un coup. Si la commande ne peut pas être analysée (entrée illisible, guillemet ou substitution jamais fermés, option globale de git inconnue), elle est refusée, avec la raison.
+
+| Réaction | Règle |
+| --- | --- |
+| Refuse | suppression récursive forcée : `rm` avec option récursive et option de force, combinées (`-rf`), séparées (`-r ... -f`) ou longues ; formes Windows (`Remove-Item -Recurse -Force`, `rmdir`/`rd`/`del`/`erase` avec `/s`) |
+| Refuse | `git clean` avec `-f` (fichiers non suivis supprimés, sans corbeille) |
+| Refuse | `git reset --hard` |
+| Refuse | poussée forcée : `--force`, `--force-with-lease`, `-f`, refspec en `+` ; même derrière `git -C`, `-c`, un alias, `env`, `sudo`, `bash -c`, `pwsh -Command`, `cmd /c` ou un sous-shell |
+| Refuse | l'option de saut des vérifications de git (`--no-verify`), qui contourne les hooks, dont le rappel avant commit |
+| Refuse | suppression ou renommage d'une branche protégée (motifs de `gardes.json`, aucun par défaut), en local et sur le dépôt distant |
+| Refuse | `git commit` dont le diff préparé touche une catégorie du rappel avant commit sans confirmation pour ce diff exact (voir plus bas) |
+| Refuse | `wrangler deploy` sans `--keep-vars` (règle d'outil, désactivable : `wrangler-keep-vars`) |
+| Demande confirmation | `git push` (nom `poussee`) et `vercel --prod` (nom `deploiement-production`), plus les commandes que `gardes.json` ajoute |
+| Signale | `vercel env add` sans `printf` : une valeur collée peut porter des sauts de ligne invisibles (règle d'outil, désactivable : `vercel-env-sans-printf`) |
+
+Un exemple affiché n'est pas une commande : `echo "git push"`, `rg "git push"` ou `Set-Content -Value 'git push'` passent. Le corps d'un here-document (`<<'FIN'`) ou d'un here-string PowerShell (`@'` ... `'@`) est du texte, qui peut contenir une apostrophe isolée (un message de commit en français) : il est sauté, sauf si la ligne qui l'annonce nomme un interpréteur (`bash`, `sh`, `pwsh`, `python`, `iex`...), auquel cas il est lu comme des commandes. Les enveloppes que l'analyse ne sait pas ouvrir (`xargs`, `find -exec`, `Invoke-Expression`, `eval`, `Start-Process`, `python -c`...) retombent sur le texte : un `git push` qui y figure suffit à refuser.
+
+**Confirmation selon l'agent.**
+- Claude Code : la garde répond « ask », l'utilisateur tranche.
+- Codex et les autres agents (tout agent dont `--agent` n'est pas `claude`, y compris un agent non nommé) : ils ne savent pas demander confirmation dans ce hook, la commande est donc **refusée**, sauf si l'utilisateur vient de l'ordonner dans son message du tour en cours. Ce message est lu dans la liste de travail (il faut donc que ses hooks tournent). Mots d'ordre par défaut : `push`, `pousse`... pour une poussée ; `deploy`, `déploie`, `mets en production`... pour un déploiement (ils se règlent). Une phrase négative, une question, un récit au passé, l'ordre d'un tour précédent, une session inconnue, une liste de travail illisible : refus. Un sous-agent ne pousse ni ne déploie jamais. Un ordre n'autorise jamais une poussée forcée ni une règle de refus.
+
+### Rappel avant commit (`scripts/gardes/checklist-*.js`, `scripts/lib/checklist-commit.js`)
+
+Un oubli fréquent : committer une migration jamais appliquée, une variable jamais posée, une fonction jamais déployée, une tâche planifiée jamais vérifiée. La garde lit le diff **préparé** (jamais le message de commit) et, si une catégorie sensible est touchée, refuse le commit tant que l'agent n'a pas confirmé, catégorie par catégorie, que l'action réelle est faite, **pour ce diff exact**.
+
+Les quatre catégories par défaut (toutes règlables) :
+
+| Nom | Déclencheur | Question posée |
+| --- | --- | --- |
+| `migrations` | un fichier préparé `migrations/**/*.sql` | schéma appliqué en réel sur la bonne base ? |
+| `fonctions` | un fichier préparé sous `supabase/functions/` | fonction(s) déployée(s) en réel ? |
+| `variables` | une ligne ajoutée qui lit une variable d'environnement (`process.env.NOM`, `Deno.env.get("NOM")`) | variable(s) posée(s) en réel dans chaque environnement ? |
+| `taches` | une ligne ajoutée qui planifie une tâche de base (l'appel `cron` suivi de `.schedule(`, ou le nom de l'extension de planification `pg` suivi de `_cron`) | tâche(s) planifiée(s) vérifiée(s) active(s) sur la bonne base ? |
+
+Le refus donne la commande de confirmation, avec le chemin réel du script du plugin. Trois réponses par catégorie : `oui` (fait et vérifié), `na` (non applicable, ou déjà prouvé plus tôt) et `non` (pas fait : documente l'état, **ne débloque pas**).
+
+```
+node "<plugin>/scripts/gardes/checklist-confirmer.js" --cwd="<dépôt>" --migrations=oui --variables=na
+```
+
+La confirmation est liée à l'empreinte du diff préparé (liste des fichiers et texte du diff) : toute modification de l'index, un fichier ajouté, retiré ou modifié, la rend caduque. Elle est écrite dans le dossier git du dépôt (`agent-memory-ledger-checklist.json`, dans `.git/worktrees/<nom>/` pour un worktree, qui a donc sa propre confirmation), jamais dans l'arbre de travail. **Lancez la confirmation seule, puis le commit dans une commande séparée.** `git commit --amend` n'est pas contrôlé (l'index est déjà figé).
+
+**Hook git natif.** Les hooks d'agents peuvent laisser passer une commande (délai dépassé, outil non couvert, autre shell) ; sur l'installation d'origine, en mode automatique, un commit non confirmé est même passé malgré le refus du hook d'un agent (constat unique, jamais rejoué ici). Seul un hook git bloque réellement le commit, quel que soit l'outil, y compris un `git commit` tapé à la main. Dans le dépôt à protéger :
+
+```sh
+# .githooks/pre-commit
+#!/bin/sh
+node "<plugin>/scripts/gardes/checklist-hook-git.js" || exit 1
+```
+
+puis `git config core.hooksPath .githooks` (avec husky : la même ligne dans `.husky/pre-commit`). Le hook refuse aussi quand la vérification elle-même tombe en panne (index illisible) : il ne laisse jamais passer faute d'avoir pu vérifier.
+
+### Caractères invisibles (`scripts/gardes/caracteres.js`)
+
+Trois modes.
+- **Avant une écriture** : refuse tout fichier, toute commande et tout patch dont le texte ÉCRIT contient un caractère invisible ou un « filigrane » typographique : espaces insécables, fines et larges, largeur nulle, marques de direction, caractères de tag, sélecteurs de variation, remplisseurs, séparateurs de ligne exotiques, contrôles C0 et C1. L'ancien texte (`old_string`), les chemins et les lignes retirées d'un patch ne sont jamais contrôlés : retirer un invisible reste possible. Exceptions étroites : une marque d'ordre des octets en tête de texte, une marque de direction dans un texte arabe, hébreu ou persan, un sélecteur de variation ou un liant de largeur nulle collé à un pictogramme, et la commande `node ... context-ledger.js` (elle cite mot pour mot les messages de l'utilisateur). Cette garde laisse passer quand son entrée est illisible : elle ne doit jamais bloquer les autres outils.
+- **Ligne de commande** : `node scripts/gardes/caracteres.js --scan <fichier>...` liste les occurrences (code 1 s'il y en a), `--fix <fichier>...` les remplace (espace normale, saut de ligne, ou suppression).
+- **Fin de tour** : `--stop` relit la dernière réponse de l'agent. Si elle contient un caractère interdit, la garde refuse une fois de finir le tour : l'agent doit redonner sa réponse corrigée. Un hook de fin de tour ne peut pas empêcher l'affichage : la réponse est déjà vue, il ne peut que forcer la correction. Une seule relance par message (`stop_hook_active`) ; les sous-agents ne sont pas contrôlés. Le tiret long (U+2014) n'est contrôlé que si `gardes.json` le demande (`caracteres.tiretLongFinDeTour`, faux par défaut). Un journal sans texte (agent, source, longueur, refus) est tenu dans `<maison>/etat/garde-caracteres-fin-de-tour.jsonl`.
+
+### Réglage : `gardes.json`
+
+Fichier facultatif dans la maison. Tout est facultatif aussi à l'intérieur.
+
+```json
+{
+  "securite": {
+    "actif": true,
+    "branchesProtegees": ["^sauvegarde-", { "motif": "\\bPROD\\b", "casse": true }],
+    "confirmer": ["poussee", "deploiement-production", { "nom": "publication", "motif": "\\bmon-outil\\s+publier\\b", "message": "Publication détectée.", "ordre": "deploiement" }],
+    "ordreUtilisateur": { "actif": true, "motsPoussee": ["push", "pousse"], "motsDeploiement": ["deploy", "déploie"] },
+    "reglesDesactivees": ["wrangler-keep-vars", "vercel-env-sans-printf"]
+  },
+  "checklist": {
+    "actif": true,
+    "categories": [
+      { "nom": "migrations", "fichiers": "(^|/)schema/.*\\.sql$" },
+      { "nom": "variables", "actif": false },
+      { "nom": "secrets", "fichiers": "(^|/)secrets/", "contenu": "SECRET_[A-Z_]+", "libelle": "secrets du coffre", "question": "secret(s) créé(s) dans le coffre ?" }
+    ]
+  },
+  "caracteres": { "actif": true, "tiretLongFinDeTour": false }
+}
+```
+
+| Clé | Effet | Défaut |
+| --- | --- | --- |
+| `securite.actif`, `checklist.actif`, `caracteres.actif` | éteint une garde (seul `false` éteint) | `true` |
+| `securite.branchesProtegees` | motifs (expressions régulières, sans casse sauf `"casse": true`) cherchés dans le texte des commandes git et dans chacun de leurs arguments, pour refuser la suppression ou le renommage d'une branche. Un motif invalide est cherché comme texte littéral | aucun : sans motif, seules la poussée forcée et les règles générales jouent |
+| `securite.confirmer` | commandes qui demandent confirmation : `poussee`, `deploiement-production`, ou un objet `{ nom, motif, message, ordre }` (`ordre` : `poussee` ou `deploiement`, l'ordre de l'utilisateur qui la débloque chez un agent qui ne sait pas demander) | `["poussee", "deploiement-production"]` |
+| `securite.ordreUtilisateur` | `false`, ou `{ actif, motsPoussee, motsDeploiement }` : fragments d'expressions régulières qui valent ordre. `false` : l'ordre de l'utilisateur ne débloque plus jamais rien, un agent sans confirmation ne pousse plus | actif, mots français et anglais |
+| `securite.reglesDesactivees` | règles d'outil à éteindre : `wrangler-keep-vars`, `vercel-env-sans-printf`. Les règles générales ne se désactivent pas une à une | aucune |
+| `checklist.categories` | une entrée par catégorie : `nom` (minuscules, chiffres, tirets), `fichiers` (motif sur le chemin d'un fichier préparé), `contenu` (motif sur les lignes ajoutées), `libelle`, `question`, `actif`. Un nom connu remplace les champs donnés de la catégorie par défaut ; `"actif": false` la retire ; un nom nouveau en ajoute une | les quatre catégories ci-dessus |
+| `caracteres.tiretLongFinDeTour` | contrôle aussi le tiret long en fin de tour | `false` |
+
+**Un `gardes.json` mal formé ne désarme jamais une garde.** Fichier illisible (JSON invalide, contenu qui n'est pas un objet) : les valeurs par défaut s'appliquent, les trois gardes restent actives, et chaque garde le dit dans son message (la garde des caractères le dit quand elle refuse). Valeur mal formée (un texte à la place d'un booléen, une liste attendue qui n'en est pas une, un motif invalide, une clé inconnue) : la valeur par défaut de cette seule clé est gardée et l'écart est rendu.
+
+### Gardes et sous-agents
+
+- La garde de sécurité juge les commandes d'un sous-agent comme celles de l'agent principal ; il ne peut jamais utiliser l'ordre de l'utilisateur pour pousser ou déployer.
+- Le rappel avant commit s'applique aux commits de tout agent, sous-agents compris, et le hook git natif aussi.
+- La garde des caractères contrôle les écritures de tous les agents ; le mode fin de tour ne contrôle pas les sous-agents.
+
+Les règles que l'agent doit connaître (ne jamais contourner un refus, confirmer en deux commandes séparées) sont dans [docs/REGLES-POUR-AGENTS.md](docs/REGLES-POUR-AGENTS.md).
 
 ## Ce qui est prouvé
 
@@ -191,8 +316,11 @@ Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 | `tests/context-ledger-codex.test.js` | 72 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
 | `tests/memoire.test.js` | 25 | hooks de mémoire, détection de projet, installateur Codex, verrou et transaction des écritures, entrées récentes, marqueur |
 | `tests/verifier-public.test.js` | 6 | contrôle avant publication |
+| `tests/gardes-securite.test.js` | 31 | garde de sécurité : chaque règle de refus, de confirmation et d'avertissement avec son cas voisin qui passe, options globales de git et alias, poussées enveloppées, here-documents, ordre de l'utilisateur chez Codex, analyse impossible, réglage, sorties validées contre le schéma de codex-cli 0.155, sortie en panne, hooks et installateur ; 30 mutations |
+| `tests/gardes-checklist.test.js` | 15 | rappel avant commit sur de vrais dépôts git temporaires : détection, refus, confirmation, caducité du diff, worktree, hook git natif réel, vérification en panne, réglage ; 12 mutations |
+| `tests/gardes-caracteres.test.js` | 16 | garde des caractères : chaque code de la liste, exceptions, Edit et patch, lignes de commande, fin de tour (transcription, anti-boucle, schéma de Stop), réglage ; 14 mutations |
 
-Plus de cent quarante mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien. Les bancs qui tiennent un verrou le posent à la première tentative du processus testé, pas avant son lancement, et ceux qui lancent dix processus à la fois vérifient que rien n'est perdu plutôt que tout aboutisse du premier coup : sous forte charge, node démarrait après la fin du verrou et une mutation restait verte, ou un message partait en copie de secours et le banc était rouge à tort. Les délais des processus qu'un banc lance sont des garde-fous larges, pas des mesures : une relance de contrôle qui demande cent secondes au repos dépassait trois minutes sous charge.
+Plus de cent quarante mutations y sont jouées (dont 56 pour les gardes : 30, 12 et 14) : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien. Les bancs qui tiennent un verrou le posent à la première tentative du processus testé, pas avant son lancement, et ceux qui lancent dix processus à la fois vérifient que rien n'est perdu plutôt que tout aboutisse du premier coup : sous forte charge, node démarrait après la fin du verrou et une mutation restait verte, ou un message partait en copie de secours et le banc était rouge à tort. Les délais des processus qu'un banc lance sont des garde-fous larges, pas des mesures : une relance de contrôle qui demande cent secondes au repos dépassait trois minutes sous charge.
 
 **En conditions réelles** :
 
@@ -210,7 +338,7 @@ Plus de cent quarante mutations y sont jouées : on casse volontairement une pro
 
 Pendant la nuit des 10 sous-agents : ils n'ont presque rien noté de leur avancement (une ou deux notes chacun en quatre heures) ; l'agent principal n'a traité aucune des 49 livraisons en attente, malgré 14 rappels ; après chacun de ses 14 compactages, il a répondu de nouveau au dernier message de l'utilisateur ; en plus des 23 lectures refusées, la garde a refusé 6 fois à un sous-agent (5 d'entre eux) d'écrire son propre rapport, parce que son texte citait le chemin de la liste ou la commande de la liste ; chacun y a perdu un tour et trois ont écrit à l'agent principal. Les hooks gardent et rappellent : ils ne font pas converger un agent. Côté Claude Code, le même jour : un hook coupé à son délai de 30 secondes et un autre de 21 secondes, alors que node avait démarré en 41 millisecondes ; la cause n'est pas établie. Depuis, la capture de diagnostic écrit la durée de chaque étape (attente d'un verrou, copie de secours, transcript, preuves).
 
-**Pas encore observé en conditions réelles** : l'écriture, par un vrai sous-agent, d'un rapport dont le texte cite la liste (prouvée par bancs, par le rejeu des 6 commandes réelles refusées, et par l'analyseur de PowerShell) ; la boîte de signalements entre agents principaux (prouvée par bancs) ; la consigne redonnée au premier outil quand le hook de démarrage a été interrompu après l'avoir comptée (prouvée par bancs ; sa recherche a été vérifiée sur les conversations réelles : trouvée dans les 11 où elle a été reçue, absente de la douzième) ; la garde élargie aux sous-expressions, aux blocs sans effet, aux boucles, aux affectations et aux méthodes de lecture, `chercher` par identifiant, la copie de secours asynchrone, la redite des sous-agents finis à chaque nouveau message, le suivi d'un sous-agent relancé après la clôture de sa ligne, et la lecture d'un commit par la sortie d'un script (prouvés par bancs) ; la fiche rendue à un sous-agent Claude Code après un compactage de son contexte ; l'installation par `/plugin install` ; les hooks d'outils et de fin de tour quand le code vient de ce dépôt plutôt que de l'installation d'origine ; macOS et Linux (développé et testé sous Windows 11, Node 22). Les hooks de mémoire sont une réécriture, commune aux deux agents, de hooks utilisés au quotidien : sous cette forme, ils sont prouvés par bancs.
+**Pas encore observé en conditions réelles** : les trois gardes de la 0.8.0 chargées par un vrai Claude Code ou un vrai Codex depuis ce dépôt (prouvées par bancs, sur des appels d'outils simulés, des sorties validées contre le schéma de hooks de codex-cli 0.155 et de vrais dépôts git temporaires ; le hook git natif, lui, a refusé et laissé passer de vrais `git commit` dans ces bancs) ; la réponse « ask » de Claude Code à une poussée ; le mode fin de tour dans une vraie session ; l'effet d'un refus de hook sur le tour de l'agent ; l'ordre de l'utilisateur lu dans la liste de travail d'un vrai tour de Codex ; l'écriture, par un vrai sous-agent, d'un rapport dont le texte cite la liste (prouvée par bancs, par le rejeu des 6 commandes réelles refusées, et par l'analyseur de PowerShell) ; la boîte de signalements entre agents principaux (prouvée par bancs) ; la consigne redonnée au premier outil quand le hook de démarrage a été interrompu après l'avoir comptée (prouvée par bancs ; sa recherche a été vérifiée sur les conversations réelles : trouvée dans les 11 où elle a été reçue, absente de la douzième) ; la garde élargie aux sous-expressions, aux blocs sans effet, aux boucles, aux affectations et aux méthodes de lecture, `chercher` par identifiant, la copie de secours asynchrone, la redite des sous-agents finis à chaque nouveau message, le suivi d'un sous-agent relancé après la clôture de sa ligne, et la lecture d'un commit par la sortie d'un script (prouvés par bancs) ; la fiche rendue à un sous-agent Claude Code après un compactage de son contexte ; l'installation par `/plugin install` ; les hooks d'outils et de fin de tour quand le code vient de ce dépôt plutôt que de l'installation d'origine ; macOS et Linux (développé et testé sous Windows 11, Node 22). Les hooks de mémoire sont une réécriture, commune aux deux agents, de hooks utilisés au quotidien : sous cette forme, ils sont prouvés par bancs.
 
 Si vous constatez un écart, ouvrez un ticket avec le payload du hook : c'est lui qui tranche.
 
@@ -249,7 +377,12 @@ Les deux vérifient aussi la version du plugin : la même dans le manifeste, dan
 - Claude Code : le filet de fin de session peut être annulé quand la session se ferme très vite (constaté une fois : « Hook cancelled »). Rien n'est perdu : le marqueur de travail non documenté reste, et l'alerte s'affiche au démarrage suivant.
 - La détection d'un commit lit la ligne de commande, puis vérifie HEAD : un commit fait par un outil graphique n'est pas journalisé. Pour la liste de travail, un commit fait par un script n'est lu que si git en écrit la ligne sur la sortie (un commit lancé avec `-q` n'en écrit pas) et si le dépôt est cité par la commande ou est le dossier courant ; `--amend` n'est pas lu (ni par la liste, ni par le journal) : écrivez alors la mention dans l'historique.
 - La mention d'un commit n'est jamais appliquée à la place d'un sous-agent : même avec `[ctx C-NNNN]`, son commit est seulement annoncé à l'agent principal.
-- Ce dépôt ne contient pas de garde de commandes dangereuses. Il protège la liste de travail, pas votre machine.
+- Gardes : un hook d'agent n'est pas une barrière absolue. Un hook tué pour délai dépassé ne rend rien (la commande passe), un outil que le hook ne couvre pas n'est pas jugé, et sur l'installation d'origine un commit non confirmé est passé malgré le refus d'un hook (voir « Gardes »). Seul le hook git natif bloque réellement un commit. Pour le reste, la garde est un filet, pas une prison : elle lit la ligne de commande, elle ne surveille pas ce qu'un script ou un programme lancé fait ensuite.
+- Garde de sécurité : l'analyse lit du texte, pas un shell. Une commande construite dynamiquement (variable, fichier de script lancé, programme qui lance git) échappe à la lecture ; les enveloppes connues (`xargs`, `Invoke-Expression`, `eval`, `python -c`...) retombent sur le texte, les autres non. Les règles de refus généraux portent sur le texte de la commande : un message de commit qui cite `git reset --hard` en clair est refusé (écrivez le message dans un fichier avec `git commit -F`). Un message de commit en here-document ou here-string passe, avec ses apostrophes, si la ligne qui l'annonce ne nomme pas d'interpréteur.
+- Garde de sécurité, Codex : l'ordre de l'utilisateur n'est lu que dans la liste de travail du tour en cours ; sans ses hooks (ou si leur délai est dépassé), la poussée est refusée, ce qui est le côté sûr.
+- Rappel avant commit : la confirmation vaut pour l'index tel qu'il était quand elle a été donnée. Un `git commit -a` ou un commit qui nomme des fichiers (`--only`) change ce qui est réellement commité : le hook git natif voit l'index de ce commit-là et peut demander une nouvelle confirmation (raisonné d'après le fonctionnement de git, non mesuré). Les catégories par défaut sont celles d'un projet web avec une base ; ajoutez les vôtres dans `gardes.json`. Au-delà de 64 Mo de diff préparé, la lecture échoue et le commit est refusé comme une vérification en panne (non essayé).
+- Garde des caractères : elle ne voit que le texte que l'outil écrit. Un fichier déjà sale n'est pas nettoyé de lui-même (`--scan`, `--fix`), et un outil qui écrit autrement que par les hooks couverts n'est pas contrôlé. Le mode fin de tour ne peut que demander une réponse corrigée : le texte fautif a déjà été affiché.
+- Gardes : développées et testées sous Windows 11 avec Node 22 ; macOS et Linux non observés. Les bancs lancent de vrais processus `git` et `node`.
 
 ## Autres documents
 

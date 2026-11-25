@@ -60,6 +60,18 @@
             "command": "node \"{{RACINE}}/scripts/codex/context-ledger.js\"",
             "timeout": 20,
             "statusMessage": "Garde de la liste de travail"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/gardes/securite.js\" --agent codex",
+            "timeout": 30,
+            "statusMessage": "Garde de sécurité des commandes"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/gardes/caracteres.js\"",
+            "timeout": 15,
+            "statusMessage": "Garde des caractères invisibles"
           }
         ]
       }
@@ -144,6 +156,12 @@
             "command": "node \"{{RACINE}}/scripts/memoire/fin-session.js\" --agent codex",
             "timeout": 15,
             "statusMessage": "Mémoire : filet de travail non commité"
+          },
+          {
+            "type": "command",
+            "command": "node \"{{RACINE}}/scripts/gardes/caracteres.js\" --stop --agent codex",
+            "timeout": 15,
+            "statusMessage": "Réponse sans caractères invisibles"
           }
         ]
       }

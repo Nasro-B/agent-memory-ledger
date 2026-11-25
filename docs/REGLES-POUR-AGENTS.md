@@ -93,6 +93,29 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   périmètre et sa révision sont inchangés. Une relance doit nommer le manque concret à résoudre ; un rappel
   de hook ne constitue pas une autorisation ni une raison de lancer un nouvel agent.
 
+## Gardes : un refus ne se contourne pas
+
+- Quand une garde refuse une commande ou une écriture, son message dit pourquoi et quoi faire. Ne contourne
+  jamais un refus (autre forme de la même commande, autre outil, script intermédiaire, option qui saute les
+  vérifications de git) : corrige la cause, ou explique le risque à l'utilisateur et attends son ordre.
+- Une commande qui demande confirmation (poussée, déploiement de production) n'est lancée que sur ordre de
+  l'utilisateur. Avec Claude Code, il tranche à la demande. Avec Codex, la commande est refusée sauf s'il vient de
+  l'ordonner dans son message du tour : sinon, présente-lui la commande exacte, il la lance lui-même. Un sous-agent
+  ne pousse ni ne déploie jamais.
+- Rappel avant commit : un commit dont le diff préparé touche une migration, une fonction déployée à part, une
+  variable d'environnement ou une tâche planifiée est refusé tant que tu n'as pas confirmé, catégorie par catégorie,
+  que l'action RÉELLE est faite (migration appliquée sur la bonne base, variable posée dans chaque environnement,
+  fonction déployée, tâche vérifiée active). Vérifie d'abord, jamais par supposition. Puis, en DEUX commandes
+  séparées : 1) la confirmation seule, avec la commande que le refus donne (`node "<plugin>/scripts/gardes/checklist-confirmer.js"
+  --cwd="<dépôt>" --<catégorie>=oui|na ...`) ; 2) le même commit, seul. `oui` : fait et vérifié ; `na` : non
+  applicable, ou déjà prouvé plus tôt ; `non` : pas fait, il ne débloque rien. Toute modification de l'index
+  (fichier ajouté, retiré, modifié) rend la confirmation caduque : confirme de nouveau. Écris le message du
+  commit dans un fichier (`git commit -F`) quand il cite une commande que la garde de sécurité refuserait.
+- Caractères invisibles : n'écris jamais d'espace insécable, de caractère de largeur nulle ni de marque de
+  direction. Utilise l'espace normale. Si un tel caractère doit figurer dans un test ou une expression régulière,
+  écris-le par son échappement de code, jamais en clair. Si ta réponse est refusée en fin de tour pour cette
+  raison, redonne-la corrigée. Pour nettoyer un fichier : `node "<plugin>/scripts/gardes/caracteres.js" --fix <fichier>`.
+
 ## Mémoire partagée
 
 - Journal de cet agent : `~/.agent-memory-ledger/history/<projet>.<agent>.md`, entrées récentes en haut.
@@ -121,3 +144,4 @@ Elles viennent de pannes mesurées, pas de préférences :
 - Dans une session réelle, 443 sous-agents ont fini, 301 pendant que l'orchestrateur faisait autre chose, et pour 248 il n'est jamais revenu dessus. Une notification passe une fois ; une ligne de travail reste jusqu'à la preuve.
 - En une nuit de travail réelle, 22 sous-agents ont vu leur contexte compacté de une à sept fois. Sans fiche, ils n'avaient que le résumé pour retrouver leur mission ; et quand ils voulaient recouper un constat avec la liste, la garde leur refusait jusqu'à la lecture. Depuis : une fiche par sous-agent, et la liste en lecture seule.
 - « C'est fait » sans preuve écrite coûte plus cher à rattraper qu'une phrase qui dit ce qui manque.
+- Des migrations jamais appliquées, des variables jamais posées et des fonctions jamais déployées ont été découvertes après coup, commit après commit : d'où le rappel avant commit, lié au diff exact, et le hook git natif qui bloque quel que soit l'outil. Un refus de garde qu'on contourne n'a plus aucune valeur : d'où la règle de ne jamais le faire.

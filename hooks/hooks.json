@@ -52,6 +52,28 @@
             "statusMessage": "Garde de la liste de travail..."
           }
         ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gardes/securite.js\" --agent claude",
+            "timeout": 30,
+            "statusMessage": "Garde de sécurité des commandes..."
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gardes/caracteres.js\"",
+            "timeout": 10,
+            "statusMessage": "Garde des caractères invisibles..."
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -109,6 +131,16 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/memoire/checkpoint.js\" --agent claude",
             "timeout": 10,
             "statusMessage": "Mémoire : point de contrôle..."
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/gardes/caracteres.js\" --stop --agent claude",
+            "timeout": 10,
+            "statusMessage": "Réponse sans caractères invisibles..."
           }
         ]
       }

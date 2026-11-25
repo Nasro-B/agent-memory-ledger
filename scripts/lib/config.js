@@ -7,6 +7,7 @@
 //   Memory-Auto.md                    résumé commun à tous les agents, une section « ### <projet> »
 //   etat/                             marqueurs de session, points de contrôle, drapeaux
 //   projets.json                      (facultatif) table des projets
+//   gardes.json                       (facultatif) réglage des gardes (voir gardes-config.js)
 //
 // Projet d'un dossier, dans cet ordre :
 //   1. la table projets.json : { "projets": [ { "nom": "mon-projet", "motif": "mon-projet|autre-dossier" } ] }
@@ -35,6 +36,7 @@ function chemins() {
     resume: path.join(m, 'Memory-Auto.md'),
     etat: path.join(m, 'etat'),
     projets: path.join(m, 'projets.json'),
+    gardes: path.join(m, 'gardes.json'),
   };
 }
 
