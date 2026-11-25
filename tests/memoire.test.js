@@ -143,7 +143,7 @@ test('démarrage : règles, résumé, journaux (le sien d\'abord), alerte ; sort
   assert.equal(r.code, 0, r.err);
   const c = ctx(r);
   assert.equal(r.json.hookSpecificOutput.hookEventName, 'SessionStart');
-  assert.match(c, /^## Attention : session précédente non documentée\n- 3 fichier\(s\) modifié\(s\) sans commit/, 'l\'alerte passe en premier');
+  assert.match(c, /^## Attention : session précédente non documentée\n- 3 édition\(s\), fichiers distincts inconnus sans commit/, 'l\'alerte passe en premier (marqueur ancien : sans la liste des fichiers distincts)');
   assert.match(c, /## Règles et réflexes : projet-demo[^\n]*\n- Toujours lancer les tests/);
   assert.match(c, /## Memory-Auto \| projet-demo \(12 dernières\)\n- .* bouton réparé/);
   assert.ok(c.indexOf('projet-demo.claude.md (récent)') < c.indexOf('projet-demo.codex.md (récent)'), 'le journal de cet agent d\'abord');
@@ -277,9 +277,9 @@ test('fin de session : travail non commité -> une entrée wip, une seule par é
   hook(m, 'marqueur.js', 'claude', { hook_event_name: 'PostToolUse', cwd: m.repo, tool_name: 'Write', tool_input: { file_path: path.join(m.repo, 'en-cours.js'), content: 'travail' } });
   fin();
   const h = lire(histoire(m));
-  assert.match(h, /\| wip \| session terminée : 1 fichier\(s\) modifié\(s\) NON commité\(s\) \(dernier : en-cours\.js\), à documenter \| Claude/);
+  assert.match(h, /\| wip \| session terminée : 1 édition\(s\), 1 fichier\(s\) distinct\(s\) NON commité\(s\) \(dernier : en-cours\.js\), à documenter \| Claude/);
   assert.match(h, /- Fichiers modifiés \(git status\) : \?\? en-cours\.js/);
-  assert.match(resume(m), /\| wip \| session terminée : 1 fichier/);
+  assert.match(resume(m), /\| wip \| session terminée : 1 édition\(s\), 1 fichier/);
   fin();
   assert.equal(lire(histoire(m)).split('| wip |').length - 1, 1, 'même état : pas de seconde entrée');
   assert.ok(marqueur(m), 'le marqueur reste tant que rien n\'est commité');
@@ -586,4 +586,158 @@ test('point de contrôle : aussi après un outil (sans sortie), même si la sess
   assert.equal(hook(s, 'checkpoint.js', 'claude', { hook_event_name: 'Stop', session_id: 's1', cwd: s.repo }).out, '');
   assert.equal(lire(histoire(s)), '', 'pas d\'entrée « état git indisponible »');
   assert.notEqual(JSON.parse(fs.readFileSync(g, 'utf8')).ts, vieux, 'la fenêtre repart');
+});
+
+// ---------------------------------------------------------------------------
+// 0.7.0 : écritures de la mémoire sous verrou et par remplacement atomique, journal et résumé en une transaction
+// rejouée après une interruption, 25 entrées les plus récentes au démarrage, éditions et fichiers distincts,
+// un seul point de contrôle ou état avant compactage par minute.
+
+// Exécute fn dans ce processus avec la maison du test.
+function avecMaison(m, fn) {
+  const avant = process.env.AGENT_MEMORY_LEDGER_HOME;
+  process.env.AGENT_MEMORY_LEDGER_HOME = m.maison;
+  try { return fn(require(path.join(SCRIPTS, 'lib', 'memoire.js'))); } finally {
+    if (avant === undefined) delete process.env.AGENT_MEMORY_LEDGER_HOME; else process.env.AGENT_MEMORY_LEDGER_HOME = avant;
+  }
+}
+
+test('mémoire : journal et résumé en une transaction, reprise rejouée après une interruption', () => {
+  const m = monde('transaction', { depot: false });
+  const entree = i => `## ${horo()} | fix | travail ${i} | Claude\n\n- détail ${i}\n`;
+  const ligne = i => `- ${horo()} | fix | travail ${i} | Claude`;
+  const reprise = path.join(m.maison, '.memoire-en-cours.json');
+  avecMaison(m, memoire => {
+    process.env.AML_PANNE_TEST = 'apres-premiere-ecriture';
+    try { assert.throws(() => memoire.ajouterEntree(PROJET, 'claude', entree(1), ligne(1)), /panne simulée/); } finally { delete process.env.AML_PANNE_TEST; }
+    assert.match(lire(histoire(m)), /travail 1/, 'le journal est écrit');
+    assert.equal(resume(m), '', 'le résumé ne l\'est pas encore');
+    assert.ok(fs.existsSync(reprise), 'les deux écritures sont gardées pour la reprise');
+    // L'accès suivant rejoue d'abord la transaction interrompue, puis fait son propre travail.
+    assert.deepEqual(memoire.ajouterEntree(PROJET, 'claude', entree(2), ligne(2)), { journal: true, resume: true });
+    assert.match(resume(m), /travail 1/);
+    assert.match(resume(m), /travail 2/);
+    assert.equal(lire(histoire(m)).split('travail 1').length - 1, 1, 'rien n\'est écrit deux fois');
+    assert.ok(!fs.existsSync(reprise), 'fichier de reprise retiré');
+    // Une entrée déjà là (commit déjà journalisé) : ni journal ni résumé.
+    assert.deepEqual(memoire.ajouterEntree(PROJET, 'claude', entree(2), ligne(2), { dejaJournal: c => c.includes('travail 2'), dejaResume: l => l.includes('travail 2') }), { journal: false, resume: false });
+  });
+  assert.deepEqual(fs.readdirSync(path.join(m.maison, 'history')).filter(n => n.endsWith('.tmp')), [], 'aucun fichier temporaire laissé');
+});
+
+test('mémoire : un verrou tenu bloque l\'écriture sans rien écrire ; celui d\'un processus mort est retiré', () => {
+  const m = monde('verrou', { depot: false });
+  const verrou = path.join(m.maison, '.memoire.lock');
+  avecMaison(m, memoire => {
+    fs.writeFileSync(verrou, `${process.pid} jeton-de-test`); // processus vivant : ce test
+    process.env.AML_DELAI_VERROU_MS = '300';
+    try {
+      assert.throws(() => memoire.ajouterAuJournal(PROJET, 'claude', `## ${horo()} | fix | bloqué | Claude\n`), /verrou occupé/);
+      assert.equal(lire(histoire(m)), '', 'rien n\'est écrit sans le verrou');
+      fs.writeFileSync(verrou, '999999999 jeton-mort');
+      assert.equal(memoire.ajouterAuJournal(PROJET, 'claude', `## ${horo()} | fix | débloqué | Claude\n`), true);
+      assert.match(lire(histoire(m)), /débloqué/);
+      assert.ok(!fs.existsSync(verrou), 'verrou libéré après l\'écriture');
+    } finally { delete process.env.AML_DELAI_VERROU_MS; }
+  });
+});
+
+test('mémoire : dix processus qui journalisent en même temps ne perdent aucune entrée', async () => {
+  const m = monde('concurrence-memoire', { depot: false });
+  const code = `const mem = require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'memoire.js'))}); const i = process.env.NUMERO; mem.ajouterEntree('${PROJET}', 'claude', '## ${horo()} | fix | travail-' + i + ' | Claude\\n\\n- d\\n', '- ${horo()} | fix | travail-' + i + ' | Claude');`;
+  const jobs = Array.from({ length: 10 }, (_, i) => new Promise(resolve => {
+    const p = spawn(process.execPath, ['-e', code], { env: Object.assign(envPour(m), { NUMERO: String(i) }), cwd: m.base, windowsHide: true });
+    let err = '';
+    p.stderr.on('data', x => (err += x));
+    p.on('close', c => resolve({ c, err }));
+  }));
+  for (const r of await Promise.all(jobs)) assert.equal(r.c, 0, r.err);
+  for (let i = 0; i < 10; i++) {
+    assert.equal(lire(histoire(m)).split(`travail-${i} |`).length - 1, 1, `journal : travail-${i}`);
+    assert.equal(resume(m).split(`travail-${i} |`).length - 1, 1, `résumé : travail-${i}`);
+  }
+});
+
+test('démarrage : les 25 entrées les plus récentes par horodatage, même si la plus récente est tout en bas ; un bloc de code n\'est pas une entrée', () => {
+  const m = monde('entrees', { depot: false });
+  const anciennes = Array.from({ length: 30 }, (_, i) => `## ${horo(-(i + 1) * 86400000)} | fix | ancienne-${i} | Claude\n\n- d\n`).join('\n');
+  const recente = `## ${horo(-60000)} | fix | RECENTE-EN-BAS | Claude\n\n- d\n\`\`\`\n## ${horo(-99 * 86400000)} | fix | TITRE-DANS-UN-BLOC | Claude\n\`\`\`\n`;
+  fs.writeFileSync(histoire(m), '# Historique\n\n---\n\n' + anciennes + '\n' + recente);
+  const c = ctx(hook(m, 'demarrage.js', 'claude', { hook_event_name: 'SessionStart', session_id: 's1', cwd: m.repo, source: 'startup' }));
+  assert.ok(c.includes('RECENTE-EN-BAS'), 'l\'entrée la plus récente, écrite en bas du fichier, est rappelée');
+  assert.ok(c.includes('ancienne-0') && c.includes('ancienne-23'), 'les 24 plus récentes des anciennes');
+  assert.ok(!c.includes('ancienne-24'), 'au-delà de 25 entrées : rien');
+  assert.ok(c.includes('TITRE-DANS-UN-BLOC'), 'un titre dans un bloc de code reste dans son entrée');
+  avecMaison(m, memoire => {
+    const brut = `# T\n\n---\n\n## 2026-01-01 10:00 | a | vieux | X\n\n## 2026-03-01 10:00 | a | récent | X\n\`\`\`\n## 2030-01-01 10:00 | a | faux | X\n\`\`\`\n\n## 2026-02-01 10:00 | a | milieu | X\n`;
+    const deux = memoire.entreesRecentes(brut, 2);
+    assert.ok(deux.indexOf('récent') < deux.indexOf('milieu') && !deux.includes('vieux') && deux.includes('faux'));
+    assert.ok(!deux.includes('# T'), 'sans l\'en-tête du fichier');
+  });
+});
+
+test('marqueur : éditions et fichiers distincts comptés à part ; une écriture qui a échoué ne compte pas ; dix éditions simultanées, dix comptées', async () => {
+  const m = monde('marqueur-distincts');
+  const ecrit = (f, reponse) => hook(m, 'marqueur.js', 'claude', { hook_event_name: 'PostToolUse', cwd: m.repo, tool_name: 'Edit', tool_input: { file_path: f, old_string: 'a', new_string: 'b' }, tool_response: reponse });
+  const a = path.join(m.repo, 'src', 'a.js');
+  const b = path.join(m.repo, 'src', 'b.js');
+  ecrit(a); ecrit(a); ecrit(b);
+  assert.equal(marqueur(m).count, 3);
+  assert.equal(marqueur(m).files.length, 2);
+  assert.match(marqueur(m).lastFile, /b\.js$/);
+  ecrit(path.join(m.repo, 'src', 'c.js'), { error: 'Permission refusée' });
+  ecrit(path.join(m.repo, 'src', 'd.js'), { isError: true });
+  ecrit(path.join(m.repo, 'src', 'e.js'), { exit_code: 1 });
+  assert.equal(marqueur(m).count, 3, 'une écriture échouée n\'a rien modifié');
+  assert.equal(marqueur(m).files.length, 2);
+  const r = hook(m, 'demarrage.js', 'claude', { hook_event_name: 'SessionStart', session_id: 's1', cwd: m.repo, source: 'startup' });
+  assert.match(ctx(r), /- 3 édition\(s\), 2 fichier\(s\) distinct\(s\) sans commit/);
+  const jobs = Array.from({ length: 10 }, (_, i) => new Promise(resolve => {
+    const p = spawn(process.execPath, [path.join(SCRIPTS, 'memoire', 'marqueur.js'), '--agent', 'claude'], { env: envPour(m), cwd: m.base, windowsHide: true });
+    p.on('close', c => resolve(c));
+    p.stdin.end(JSON.stringify({ hook_event_name: 'PostToolUse', cwd: m.repo, tool_name: 'Write', tool_input: { file_path: path.join(m.repo, 'src', `n${i}.js`), content: 'x' } }));
+  }));
+  assert.deepEqual(await Promise.all(jobs), Array(10).fill(0));
+  assert.equal(marqueur(m).count, 13, 'aucune édition perdue');
+  assert.equal(marqueur(m).files.length, 12);
+});
+
+test('point de contrôle et état avant compactage : un seul par minute quand deux hooks passent en même temps', () => {
+  const m = monde('doublons');
+  commiter(m, 'premier.txt', 'chore: base');
+  fs.mkdirSync(path.join(m.maison, 'etat'), { recursive: true });
+  const f = path.join(m.maison, 'etat', `.checkpoint-${PROJET}-claude`);
+  const vieillir = () => fs.writeFileSync(f, JSON.stringify({ ts: new Date(Date.now() - 3 * 3600000).toISOString(), sessionId: 's1' }));
+  const stop = () => hook(m, 'checkpoint.js', 'claude', { hook_event_name: 'Stop', session_id: 's1', cwd: m.repo, stop_hook_active: false });
+  const compactage = () => hook(m, 'avant-compactage.js', 'claude', { hook_event_name: 'PreCompact', session_id: 's1', cwd: m.repo, trigger: 'auto' });
+  // Les deux appels doivent tomber dans la même minute (l'horodatage du journal est à la minute) : trois essais.
+  for (let essai = 0; essai < 3; essai++) {
+    fs.rmSync(histoire(m), { force: true });
+    const debut = horo();
+    vieillir(); stop(); vieillir(); stop();
+    compactage(); compactage();
+    if (horo() === debut) break;
+  }
+  assert.equal(lire(histoire(m)).split('| checkpoint |').length - 1, 1, 'un seul point de contrôle');
+  assert.equal(lire(histoire(m)).split('| precompact |').length - 1, 1, 'un seul état avant compactage');
+});
+
+test('mutation : verrou, reprise, verrou périmé, doublons, 25 entrées, éditions échouées -> banc rouge', { skip: EN_MUTATION }, () => {
+  const motif = '^(mémoire : |démarrage : les 25|marqueur : éditions|point de contrôle et état avant)';
+  const temoin = relancer(copie('temoin-memoire-070'), motif);
+  assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
+  const mutations = [
+    ['verrou-memoire', path.join('lib', 'memoire.js'), '  return (() => { reprendre(); return fn(); })(); // MUTATION : pas de verrou', /not ok \d+ - mémoire : un verrou tenu/],
+    ['transaction-reprise', path.join('lib', 'memoire.js'), '      for (const [r, c] of ecritures) transaction.ecrireAtomique(path.join(config.maison(), r), c); // MUTATION : écritures sans journal de reprise', /not ok \d+ - mémoire : journal et résumé en une transaction/],
+    ['verrou-perime', path.join('lib', 'transaction.js'), '          // MUTATION : verrou d\'un processus mort jamais retiré', /not ok \d+ - mémoire : un verrou tenu/],
+    ['checkpoint-doublon', path.join('memoire', 'checkpoint.js'), '  memoire.ajouterAuJournal(projet, AGENT, entree); // MUTATION : point de contrôle en double', /not ok \d+ - point de contrôle et état avant compactage/],
+    ['precompact-doublon', path.join('memoire', 'avant-compactage.js'), '  memoire.ajouterAuJournal(projet, AGENT, entree); // MUTATION : état avant compactage en double', /not ok \d+ - point de contrôle et état avant compactage/],
+    ['demarrage-entrees', path.join('memoire', 'demarrage.js'), "      const lignes = fs.readFileSync(path.join(c.history, f), 'utf8').split(/\\r?\\n/).filter(l => l.trim()).slice(0, 25).join('\\n'); // MUTATION : 25 premières lignes", /not ok \d+ - démarrage : les 25/],
+    ['marqueur-echec', path.join('memoire', 'marqueur.js'), '  // MUTATION : une écriture échouée est comptée', /not ok \d+ - marqueur : éditions/],
+  ];
+  for (const [ancre, fichier, remplacement, rouge] of mutations) {
+    const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), motif);
+    assert.notEqual(r.status, 0, `la mutation ${ancre} doit rendre un banc rouge :\n` + r.stdout);
+    assert.match(r.stdout, rouge, ancre);
+  }
 });

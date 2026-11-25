@@ -8,7 +8,7 @@
 //   1. les règles et réflexes du projet (history/<projet>.rules.md, écrit à la main) ;
 //   2. les 12 dernières lignes du projet dans le résumé commun (Memory-Auto.md) ;
 //   3. le rappel du protocole mémoire ;
-//   4. le journal de CET agent, puis ceux des autres agents (25 lignes par fichier).
+//   4. le journal de CET agent, puis ceux des autres agents (les 25 entrées les plus récentes de chaque fichier).
 // Une section trop longue est coupée avec son chemin, une section sans place est nommée : rien ne disparaît
 // en silence. Hors projet reconnu (voir ../lib/config.js) : aucune sortie.
 
@@ -40,7 +40,8 @@ memoire.avecEntree(input => {
       .filter(f => f.endsWith('.md') && f !== projet + '.rules.md' && f.startsWith(projet + '.') && f.slice(projet.length + 1, -3).indexOf('.') === -1)
       .sort((a, b) => (a === mien ? 0 : 1) - (b === mien ? 0 : 1) || a.localeCompare(b));
     for (const f of fichiers) {
-      const lignes = fs.readFileSync(path.join(c.history, f), 'utf8').split(/\r?\n/).filter(l => l.trim()).slice(0, 25).join('\n');
+      // Les 25 entrées les plus récentes (par horodatage), pas les 25 premières lignes du fichier.
+      const lignes = memoire.entreesRecentes(fs.readFileSync(path.join(c.history, f), 'utf8'), 25).trim(); // ancre-mutation:demarrage-entrees
       if (lignes) items.push({ prio: f === mien ? 4 : 5, path: path.join(c.history, f), text: '## Historique | ' + f + ' (récent)\n' + lignes });
     }
   } catch (_) { /* pas encore d'historique */ }
@@ -57,7 +58,7 @@ memoire.avecEntree(input => {
     const age = Number.isFinite(ageMin) ? (ageMin < 60 ? ageMin + ' min' : Math.round(ageMin / 60) + ' h') : '?';
     items.push({ prio: 0, path: memoire.fichierMarqueur(projet), text:
       '## Attention : session précédente non documentée\n' +
-      '- ' + (marqueur.count || 0) + ' fichier(s) modifié(s) sans commit (il y a ' + age + ')\n' +
+      '- ' + (marqueur.count || 0) + ' édition(s), ' + (Array.isArray(marqueur.files) ? marqueur.files.length + ' fichier(s) distinct(s)' : 'fichiers distincts inconnus') + ' sans commit (il y a ' + age + ')\n' +
       '- Dernier fichier touché : ' + (marqueur.lastFile || '?') + '\n' +
       '- Si cette session continue ce travail : écris une entrée dans ' + memoire.fichierHistorique(projet, AGENT) + ' avant de clôturer.' });
   }

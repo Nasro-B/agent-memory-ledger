@@ -68,8 +68,9 @@ memoire.avecEntree(input => {
   if (!lignes.length) return;
 
   const cause = input.trigger === 'manual' ? 'demandé' : 'automatique';
-  const entree = `## ${memoire.horodatage()} | precompact | État sauvé avant compactage ${cause} | ${config.SIGNATURES[AGENT]}\n\n` +
+  const titre = `## ${memoire.horodatage()} | precompact | État sauvé avant compactage ${cause} | ${config.SIGNATURES[AGENT]}`;
+  const entree = `${titre}\n\n` +
     '- Écrit juste avant que le contexte soit résumé : l\'état du disque à cet instant.\n' + lignes.join('\n') + '\n';
   if (DRY) { process.stdout.write('[dry] ' + memoire.fichierHistorique(projet, AGENT) + ' <-\n' + entree); return; }
-  memoire.ajouterAuJournal(projet, AGENT, entree);
+  memoire.ajouterAuJournal(projet, AGENT, entree, contenu => contenu.includes(titre)); // ancre-mutation:precompact-doublon
 });

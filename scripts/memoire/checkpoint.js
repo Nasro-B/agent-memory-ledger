@@ -42,8 +42,10 @@ memoire.avecEntree(input => {
   const p2 = n => String(n).padStart(2, '0');
   const duree = `${Math.floor(age / 3600000)}h${p2(Math.round((age % 3600000) / 60000))}`;
   const ligne = `[${etat.branche}] ${etat.dernier} : ${etat.sale} modifié(s), ${etat.nonSuivis} non suivi(s)`;
-  const entree = `## ${memoire.horodatage()} | checkpoint | Point de contrôle automatique (${duree}) | ${config.SIGNATURES[AGENT]}\n\n- ${ligne}\n`;
-  memoire.ajouterAuJournal(projet, AGENT, entree);
+  const horo = memoire.horodatage();
+  const entree = `## ${horo} | checkpoint | Point de contrôle automatique (${duree}) | ${config.SIGNATURES[AGENT]}\n\n- ${ligne}\n`;
+  // Deux hooks qui passent en même temps (fin de tour et outil) : un seul point de contrôle par minute.
+  memoire.ajouterAuJournal(projet, AGENT, entree, contenu => contenu.includes(`## ${horo} | checkpoint | Point de contrôle automatique (`)); // ancre-mutation:checkpoint-doublon
   noter();
   if (AGENT === 'claude' && String(input.hook_event_name || '') !== 'PostToolUse') {
     process.stdout.write(JSON.stringify({

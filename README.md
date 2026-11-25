@@ -25,7 +25,7 @@ message de l'utilisateur ──► M-0042 (mot pour mot, « à trier »)
                              retirée de la liste, sur cette preuve
 ```
 
-La commande `etat` ne marque jamais une ligne « faite ». Le marqueur `[ctx C-NNNN]` dans un historique ou un commit reste compatible. Pour un rapport examiné, `traiter` exige un fichier portant le statut et le marqueur exacts ; il conserve l'exécutant, le vérificateur et le SHA-256 de la preuve. Les exemples, citations et mentions de travail non terminé ne valent pas clôture. Une garde refuse toute modification à la main de la liste, et une ligne effacée est restaurée depuis un journal en ajout seul.
+La commande `etat` ne marque jamais une ligne « faite ». Le marqueur `[ctx C-NNNN]` dans un historique ou un commit reste compatible. Pour un rapport examiné, `traiter` exige un fichier portant le statut et le marqueur exacts ; il conserve l'exécutant, le vérificateur et le SHA-256 de la preuve. Les exemples, citations et mentions de travail non terminé ne valent pas clôture : un mot comme « en cours », « à faire » ou « non vérifié » annule une mention complète quand il est dans la même proposition qu'elle (entre deux « ; », points ou « | »), pas quand il est ailleurs dans la ligne. Un commit ne ferme une ligne que si son message porte la mention et que le hook retrouve son dépôt ; le commit d'un sous-agent ne ferme rien. Le détail est dans [docs/CLOTURE-ET-REPRISE.md](docs/CLOTURE-ET-REPRISE.md#ce-qui-ferme-une-ligne-et-ce-qui-la-laisse-ouverte). Une garde refuse toute modification à la main de la liste, et une ligne effacée est restaurée depuis un journal en ajout seul.
 
 Les rappels automatiques portent sur la conversation courante. Les autres missions restent sur disque ; `reprendre --session <ID> C-NNNN` les rattache explicitement à une reprise. Un événement de fin reçu deux fois ne recrée pas un travail déjà traité. Le fonctionnement et les limites sont décrits dans [docs/CLOTURE-ET-REPRISE.md](docs/CLOTURE-ET-REPRISE.md).
 
@@ -131,6 +131,8 @@ Dans `~/.agent-memory-ledger`, jamais dans vos dépôts. Pour un autre emplaceme
 | `CONTEXT_LEDGER_SECOURS_DIR` | copie de secours du journal de la liste, de préférence sur un autre disque ; si le dossier principal est effacé, la liste est reconstruite depuis cette copie |
 | `CONTEXT_LEDGER_RAPPEL_LIVRAISONS_MIN` | délai, en minutes, du rappel en cours de tour des résultats de sous-agents non traités (défaut : 20) |
 | `CONTEXT_LEDGER_BUDGET_MS` | budget de temps d'un hook de la liste de travail, en millisecondes, démarrage de node compris. À poser seulement si vous changez les délais des hooks : gardez-le sous le plus court (voir « Délais ») |
+| `AML_DELAI_VERROU_MS` | délai, en millisecondes, d'attente du verrou des écritures de mémoire (défaut : 5000). Sert aux bancs ; il n'y a aucune raison d'y toucher |
+| `AML_PANNE_TEST` | bancs seulement : `apres-premiere-ecriture` interrompt une transaction de mémoire après son premier fichier, pour prouver qu'elle est rejouée. Ne jamais le poser |
 | `CONTEXT_LEDGER_SHELL` | shell dans lequel Codex lance ses commandes : `powershell` ou `bash`. Codex ne le dit pas aux hooks ; sans cette variable, la garde suppose PowerShell sous Windows et un shell POSIX ailleurs. À poser seulement si votre installation diffère (voir « Limites connues », garde) |
 
 **Projets.** Le projet d'une session est le nom du dossier racine de son dépôt git (un worktree compte pour son dépôt). Pour regrouper plusieurs dossiers sous un nom, ou nommer un dossier qui n'est pas un dépôt, créez `projets.json` dans la maison :
@@ -148,7 +150,7 @@ Le motif est une expression régulière appliquée au chemin ; le premier qui co
 | Début de session | réinjecte les demandes et travaux rattachés à cette conversation | règles du projet, résumé, journaux récents, alerte de travail non documenté |
 | Message de l'utilisateur | enregistre mot pour mot | |
 | Avant un outil | refuse l'écriture à la main dans la liste ; pour un sous-agent : lecture permise, écriture refusée ; un fichier à soi dont le texte cite la liste (un rapport) s'écrit quand même | |
-| Après un outil | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et ceux d'un autre agent principal, rappelle les résultats qui attendent, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) ; pour un sous-agent : lui rend sa fiche après un compactage de son contexte, ou lui donne sa consigne si son démarrage a manqué | journalise les commits, compte les fichiers modifiés |
+| Après un outil | applique les preuves `[ctx]` (y compris celles d'un commit fait par un script, lu par la ligne que git écrit), dit tout de suite qu'un commit ne porte aucune mention, rappelle les preuves « partiel » répétées, suit les sous-agents lancés, annonce ceux qui viennent de finir et leurs commits (sans les appliquer), dit leurs signalements et ceux d'un autre agent principal, rappelle les résultats qui attendent, enregistre les réponses de l'utilisateur à un questionnaire (Claude Code) ; pour un sous-agent : lui rend sa fiche après un compactage de son contexte, ou lui donne sa consigne si son démarrage a manqué | journalise les commits (journal et résumé en une transaction), compte les éditions et les fichiers distincts |
 | Fin de tour | rappel borné par message humain et par état des livraisons ; un état inchangé ne provoque pas de nouvelle continuation | point de contrôle toutes les deux heures |
 | Démarrage d'un sous-agent | crée sa fiche et lui donne sa consigne | |
 | Fin d'un sous-agent | marque son résultat « à traiter » | |
@@ -166,6 +168,7 @@ Sur une machine saturée, le démarrage de node suffit à dépasser dix secondes
 
 ### Mise à jour depuis une version précédente
 
+- 0.7.0, liste de travail : la mention complète n'est plus annulée par un mot de travail non fini d'une autre proposition de la ligne (et « non terminée », « à vérifier » avec accent ou au féminin sont reconnus) ; un commit est lu après `Set-Location`, `cd` ou `$d = '...'; git -C $d`, et un commit fait par un script est lu par la ligne que git écrit ; un commit sans mention est dit tout de suite ; les preuves « partiel » sont comptées et rappelées toutes les cinq ; le commit d'un sous-agent est annoncé à l'agent principal sans rien fermer ; la demande de message suggéré de Codex n'est plus un message de l'utilisateur ; `ajouter` avertit d'une ligne qui porte plusieurs travaux, d'une réponse de questionnaire ou d'une consigne ; les fichiers temporaires d'écritures interrompues de plus d'une heure sont retirés au démarrage. Mémoire : les écritures du journal et du résumé passent sous un verrou, par remplacement atomique, et en une transaction rejouée si elle est interrompue ; le démarrage rappelle les 25 entrées les plus récentes par horodatage (et non les 25 premières lignes) ; le marqueur de travail non documenté compte les éditions et les fichiers distincts, et ignore une écriture échouée ; un point de contrôle ou un état avant compactage n'est écrit qu'une fois par minute. Rien à refaire : les fichiers existants restent lisibles (un marqueur ancien, sans liste de fichiers, s'affiche « fichiers distincts inconnus »).
 - Claude Code : mettez le plugin à jour ; les deux nouveaux hooks (démarrage d'un sous-agent, après compactage) sont actifs à la session suivante.
 - Codex : l'installateur ne modifie jamais un hook déjà en place, vos anciens délais (10 secondes) restent donc. Pour prendre les nouveaux : `node scripts/installer-codex.js --retirer --appliquer`, puis `node scripts/installer-codex.js --appliquer`, et approuvez de nouveau les hooks dans Codex. Si vous gardez les anciens délais, posez `CONTEXT_LEDGER_BUDGET_MS=8000` dans l'environnement où tourne Codex.
 
@@ -182,12 +185,13 @@ Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 | Banc | Tests | Couvre |
 | --- | --- | --- |
 | `tests/anti-boucle.test.js` | 19 | perte de preuve, répétition des fins, périmètre de session, reçus, adaptateurs Claude Code et Codex |
-| `tests/context-ledger-claude.test.js` | 91 | noyau et adaptateur Claude Code |
-| `tests/context-ledger-codex.test.js` | 62 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
-| `tests/memoire.test.js` | 14 | hooks de mémoire, détection de projet, installateur Codex |
+| `tests/context-ledger-claude.test.js` | 99 | noyau et adaptateur Claude Code |
+| `tests/context-ledger-fermeture.test.js` | 14 | fermeture des lignes : mentions, commits lus (dossiers, sortie d'un script), commit sans mention, preuves partielles, commits de sous-agents, conseils de `ajouter`, textes de machine, fichiers temporaires |
+| `tests/context-ledger-codex.test.js` | 70 | adaptateur Codex, sorties validées contre le schéma de codex-cli 0.155 |
+| `tests/memoire.test.js` | 25 | hooks de mémoire, détection de projet, installateur Codex, verrou et transaction des écritures, entrées récentes, marqueur |
 | `tests/verifier-public.test.js` | 6 | contrôle avant publication |
 
-Cent deux mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien. Les bancs qui tiennent un verrou le posent à la première tentative du processus testé, pas avant son lancement, et ceux qui lancent dix processus à la fois vérifient que rien n'est perdu plutôt que tout aboutisse du premier coup : sous forte charge, node démarrait après la fin du verrou et une mutation restait verte, ou un message partait en copie de secours et le banc était rouge à tort. Les délais des processus qu'un banc lance sont des garde-fous larges, pas des mesures : une relance de contrôle qui demande cent secondes au repos dépassait trois minutes sous charge.
+Plus de cent trente mutations y sont jouées : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien. Les bancs qui tiennent un verrou le posent à la première tentative du processus testé, pas avant son lancement, et ceux qui lancent dix processus à la fois vérifient que rien n'est perdu plutôt que tout aboutisse du premier coup : sous forte charge, node démarrait après la fin du verrou et une mutation restait verte, ou un message partait en copie de secours et le banc était rouge à tort. Les délais des processus qu'un banc lance sont des garde-fous larges, pas des mesures : une relance de contrôle qui demande cent secondes au repos dépassait trois minutes sous charge.
 
 **En conditions réelles** :
 
@@ -242,7 +246,8 @@ Les deux vérifient aussi la version du plugin : la même dans le manifeste, dan
 - Claude Code : le filet qui donne sa consigne à un sous-agent à son premier outil ne joue que pour les outils que le hook écoute (écriture de fichier, shell, lancement d'agent). Un sous-agent qui ne fait que lire ne la reçoit que par l'événement de démarrage.
 - Codex : le filet « travail non commité » tourne à chaque fin de tour, parce que le délai de son événement de fin de session (une seconde par défaut, trois au plus) est trop court. Il n'écrit qu'une entrée par état.
 - Claude Code : le filet de fin de session peut être annulé quand la session se ferme très vite (constaté une fois : « Hook cancelled »). Rien n'est perdu : le marqueur de travail non documenté reste, et l'alerte s'affiche au démarrage suivant.
-- La détection d'un commit lit la ligne de commande, puis vérifie HEAD : un commit fait par un outil graphique n'est pas journalisé.
+- La détection d'un commit lit la ligne de commande, puis vérifie HEAD : un commit fait par un outil graphique n'est pas journalisé. Pour la liste de travail, un commit fait par un script n'est lu que si git en écrit la ligne sur la sortie (un commit lancé avec `-q` n'en écrit pas) et si le dépôt est cité par la commande ou est le dossier courant ; `--amend` n'est pas lu (ni par la liste, ni par le journal) : écrivez alors la mention dans l'historique.
+- La mention d'un commit n'est jamais appliquée à la place d'un sous-agent : même avec `[ctx C-NNNN]`, son commit est seulement annoncé à l'agent principal.
 - Ce dépôt ne contient pas de garde de commandes dangereuses. Il protège la liste de travail, pas votre machine.
 
 ## Autres documents

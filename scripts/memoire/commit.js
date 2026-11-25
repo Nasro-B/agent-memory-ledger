@@ -109,8 +109,8 @@ memoire.avecEntree(input => {
     const entree = `## ${horo} | ${type} | ${titre} ${marque} | ${signature}\n\n${details.join('\n')}\n`;
     const ligne = `- ${horo} | ${type} | ${titre} ${marque} | ${signature}`;
     if (DRY) { process.stdout.write('[dry] ' + memoire.fichierHistorique(projet, AGENT) + ' <-\n' + entree + '[dry] résumé <- ' + ligne + '\n'); continue; }
-    memoire.ajouterAuJournal(projet, AGENT, entree, contenu => contenu.includes(marque));
-    memoire.ajouterAuResume(projet, ligne, l => l.includes(marque));
+    // Journal et résumé en une transaction (sous verrou) : jamais l'un sans l'autre, jamais deux fois le même commit.
+    memoire.ajouterEntree(projet, AGENT, entree, ligne, { dejaJournal: contenu => contenu.includes(marque), dejaResume: l => l.includes(marque) });
     memoire.retirerMarqueur(projet); // ancre-mutation:commit-marqueur
     if (AGENT === 'claude') {
       process.stdout.write(JSON.stringify({ systemMessage: `[mémoire] Entrée signée ${signature} : ${path.basename(memoire.fichierHistorique(projet, AGENT))} et Memory-Auto.md : ${horo} | ${type} | ${titre}` }));

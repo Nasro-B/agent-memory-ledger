@@ -6,7 +6,7 @@
 //   node fin-session.js --agent claude|codex [--dry]
 //
 // À brancher sur SessionEnd. Il peut aussi tourner sur Stop (fin de tour) : une entrée n'est écrite qu'une
-// fois par état (même nombre de fichiers, même dernier fichier). Le marqueur reste en place : la session
+// fois par état (même nombre d'éditions et de fichiers distincts, même dernier fichier). Le marqueur reste en place : la session
 // suivante affichera l'alerte tant qu'aucun commit n'a documenté le travail. Si le dépôt du dernier fichier
 // est propre, le marqueur est périmé : il est retiré et rien n'est écrit.
 
@@ -45,12 +45,12 @@ memoire.avecEntree(input => {
   }
 
   const dernier = marqueur.lastFile ? path.basename(marqueur.lastFile) : '?';
-  const titre = `session terminée : ${nombre} fichier(s) modifié(s) NON commité(s) (dernier : ${dernier}), à documenter`;
+  const distincts = Array.isArray(marqueur.files) ? marqueur.files.length : null;
+  const titre = `session terminée : ${nombre} édition(s), ${distincts === null ? 'fichiers distincts inconnus' : distincts + ' fichier(s) distinct(s)'} NON commité(s) (dernier : ${dernier}), à documenter`;
   const horo = memoire.horodatage();
   const signature = config.SIGNATURES[AGENT];
   const entree = `## ${horo} | wip | ${titre} | ${signature}\n\n${details.join('\n')}\n`;
   const ligne = `- ${horo} | wip | ${titre} | ${signature}`;
   if (DRY) { process.stdout.write('[dry] ' + memoire.fichierHistorique(projet, AGENT) + ' <-\n' + entree + '[dry] résumé <- ' + ligne + '\n'); return; }
-  memoire.ajouterAuJournal(projet, AGENT, entree, contenu => contenu.includes(`| wip | ${titre}`));
-  memoire.ajouterAuResume(projet, ligne, l => l.includes(`| wip | ${titre}`));
+  memoire.ajouterEntree(projet, AGENT, entree, ligne, { dejaJournal: contenu => contenu.includes(`| wip | ${titre}`), dejaResume: l => l.includes(`| wip | ${titre}`) });
 });

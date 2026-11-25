@@ -18,7 +18,7 @@ La maison est le dossier `~/.agent-memory-ledger` (ou celui de la variable `AGEN
 
 ## 2. Au début d'une session
 
-Les hooks injectent, sous un plafond de 9 000 caractères : la liste de travail du projet, l'alerte « session précédente non documentée », les règles du projet, les dernières lignes du résumé commun, le journal récent de chaque agent. Ce qui ne tient pas est nommé avec son chemin : le lire au besoin.
+Les hooks injectent, sous un plafond de 9 000 caractères : la liste de travail du projet, l'alerte « session précédente non documentée » (nombre d'éditions et de fichiers distincts modifiés sans commit), les règles du projet, les dernières lignes du résumé commun, le journal récent de chaque agent (ses 25 entrées les plus récentes par horodatage, quel que soit leur rang dans le fichier). Ce qui ne tient pas est nommé avec son chemin : le lire au besoin.
 
 Après un compactage, ou à une reprise, c'est la liste de travail qui dit ce qui reste, pas le résumé de la conversation.
 
@@ -55,6 +55,10 @@ Format, identique pour tous :
 - Type : `feat`, `fix`, `refactor`, `tests`, `config`, `docs`, `deploy`, ou le type du commit.
 - Les entrées récentes vont en haut du journal, juste après la ligne `---`.
 - Citer `[ctx C-NNNN]` retire la ligne de la liste de travail ; `[ctx C-NNNN partiel]` la laisse en cours. Aucune commande ne marque « fait » sans cette preuve écrite.
+- Une mention complète n'est lue que si aucun mot de travail non fini (« en cours », « à faire », « à vérifier », « non fait », « non vérifié », « pas fini »...) ne figure dans SA proposition, c'est-à-dire entre deux « ; », points suivis d'une espace ou « | ». Mettre la mention dans une proposition à elle, en fin de titre. Une ligne qui commence par `>` ou contient « exemple : » est ignorée.
+- Un commit ne ferme une ligne que si son message porte la mention. Il est lu sous les formes `git -C <dépôt> commit`, `cd <dépôt> && git commit`, `Set-Location '<dépôt>'; git commit`, `$d = '<dépôt>'; git -C $d commit`, et, pour un commit fait par un script, par la ligne que git écrit sur sa sortie (`[branche 1a2b3c4] titre`) : le dépôt est cherché parmi les chemins cités par la commande et le dossier courant. Ne sont pas lus : un commit lancé en silence (`-q`) dans un script, et `--amend` ; la mention s'écrit alors dans l'historique. Après un commit sans mention, le hook le dit : répondre par la mention, complète ou partielle.
+- Le commit d'un sous-agent ne ferme jamais une ligne, même avec une mention : il est noté et annoncé une fois à l'agent principal, qui lit le diff, vérifie, puis cite lui-même la mention.
+- Une ligne citée « partiel » cinq, dix, quinze fois déclenche un rappel : écrire ce qui reste dans sa note (`etat C-NNNN en-cours "reste : ..."`), ou fermer la partie faite par une mention complète et ouvrir une ligne neuve pour le reste.
 - Pour un livrable examiné, `traiter` valide un reçu contenant le fichier de preuve, son SHA-256, l'exécutant, le vérificateur, le résultat et les restes. Les statuts et les identifiants sont détaillés dans [CLOTURE-ET-REPRISE.md](CLOTURE-ET-REPRISE.md). Les journaux d'appels d'outils sont des indices, jamais une preuve automatique d'achèvement.
 
 ## 5. Règles d'or
@@ -62,10 +66,12 @@ Format, identique pour tous :
 1. Chacun écrit dans SON journal `<projet>.<agent>.md`, jamais dans celui d'un autre agent.
 2. Le résumé commun est partagé : on y ajoute sa ligne signée, on ne modifie ni n'efface celle d'un autre.
 3. Rien ne s'écrase : les entrées s'ajoutent.
-4. Pas de doublon : ne pas réinsérer une ligne identique (les hooks dédoublonnent par SHA de commit).
+4. Pas de doublon : ne pas réinsérer une ligne identique (les hooks dédoublonnent par SHA de commit, et un point de contrôle ou un état avant compactage n'est écrit qu'une fois par minute).
 5. Les hooks ne prouvent pas qu'un travail est branché, testé ou déployé : ils journalisent. La preuve reste à écrire.
 6. La liste de travail ne se modifie jamais à la main : une garde refuse, et toute ligne effacée est restaurée.
 7. Seul l'agent principal écrit dans la liste. Un sous-agent la lit, écrit dans sa fiche, et signale ce qu'il constate.
+8. Une ligne de travail par travail demandé. Un message entier recopié en une seule ligne qui en porte plusieurs n'est jamais « entièrement fait » et reste citée « partiel » sans fin ; une contrainte (« ne lance aucun sous-agent ») ou une réponse de questionnaire n'est pas un travail à finir : `ajouter` avertit, sans refuser.
+9. Les écritures du journal et du résumé se font sous un verrou commun, par remplacement atomique du fichier ; quand un événement touche les deux (un commit), en une seule transaction, rejouée au prochain accès si elle a été interrompue. Deux agents qui journalisent en même temps ne perdent pas une ligne.
 
 ## 6. Ce que font les hooks
 
@@ -75,9 +81,9 @@ Format, identique pour tous :
 | Début de session | `memoire/demarrage.js` | réinjecte la mémoire du projet |
 | Message de l'utilisateur | `context-ledger.js` | enregistre le message mot pour mot |
 | Avant un outil | `context-ledger.js` | refuse toute écriture à la main dans la liste de travail ; pour un sous-agent : lecture permise, écriture refusée ; un fichier à soi dont le texte cite la liste (un rapport) s'écrit quand même |
-| Après un outil | `context-ledger.js` | applique les preuves `[ctx]`, suit les sous-agents lancés, annonce ceux qui viennent de finir, dit leurs signalements et rappelle les résultats qui attendent ; rend sa fiche à un sous-agent dont le contexte vient d'être compacté |
-| Après un commit | `memoire/commit.js` | entrée signée dans le journal et le résumé |
-| Après une écriture de fichier | `memoire/marqueur.js` | compte le travail non documenté |
+| Après un outil | `context-ledger.js` | applique les preuves `[ctx]` (commits lus par leur commande ou par la sortie d'un script), dit tout de suite qu'un commit ne porte aucune mention, rappelle les preuves « partiel » répétées, suit les sous-agents lancés, annonce ceux qui viennent de finir et leurs commits (sans les appliquer), dit leurs signalements et rappelle les résultats qui attendent ; rend sa fiche à un sous-agent dont le contexte vient d'être compacté |
+| Après un commit | `memoire/commit.js` | entrée signée dans le journal et le résumé, en une transaction |
+| Après une écriture de fichier | `memoire/marqueur.js` | compte les éditions et les fichiers distincts du travail non documenté (une écriture échouée ne compte pas) |
 | Fin de tour | `context-ledger.js` | rappel borné par message humain et par état des livraisons, sans continuation répétée d'un état inchangé |
 | Fin de tour | `memoire/checkpoint.js` | point de contrôle toutes les deux heures |
 | Démarrage d'un sous-agent | `context-ledger.js` | crée sa fiche et lui donne sa consigne (redonnée à son premier outil si cet événement a manqué, ou si sa conversation ne la contient pas) |
