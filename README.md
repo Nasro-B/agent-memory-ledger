@@ -14,6 +14,8 @@ Un agent de code oublie de cinq façons. Ce dépôt les ferme une par une, avec 
 
 Depuis la 0.8.0, le dépôt apporte aussi trois gardes (voir [Gardes](#gardes)) : une garde de sécurité des commandes (refuse les commandes destructrices, demande confirmation pour une poussée ou un déploiement de production), un rappel avant commit (un commit qui touche une migration, une fonction déployée à part, une variable d'environnement ou une tâche planifiée est refusé tant que l'agent n'a pas confirmé l'action réelle) et une garde des caractères invisibles. Elles sont actives par défaut et se règlent dans `gardes.json`.
 
+Depuis la 0.9.0, le dépôt apporte aussi les **logiques pures** du Cockpit et de ses modules (réglages, Régulateur d'agents et sa file d'attente, Consignes, Nuit, Pause, Garde-quota, modèles par agent), avec leurs bancs et leurs preuves par mutation. Elles ne sont pas encore branchées : ni noyau d'entrées-sorties, ni commande, ni hook (voir [docs/COCKPIT-ET-MODULES.md](docs/COCKPIT-ET-MODULES.md)).
+
 ## Comment ça marche
 
 ```
@@ -183,6 +185,7 @@ Sur une machine saturée, le démarrage de node suffit à dépasser dix secondes
 
 ### Mise à jour depuis une version précédente
 
+- **0.9.0, rien à refaire.** Les logiques pures du Cockpit et de ses modules sont ajoutées, sans effet tant qu'aucune commande ni aucun hook ne les appelle : le comportement des hooks et des gardes ne change pas.
 - **0.8.0, les trois gardes sont actives dès la mise à jour.** Pour en désactiver une, créez `gardes.json` dans la maison (`~/.agent-memory-ledger`, ou `AGENT_MEMORY_LEDGER_HOME`) : `{ "securite": { "actif": false } }`, `{ "checklist": { "actif": false } }` ou `{ "caracteres": { "actif": false } }`, ensemble ou séparément. Sans ce fichier rien n'est à faire. Seul un `false` écrit comme tel éteint une garde : un fichier illisible, ou une valeur autre qu'un booléen, laisse les gardes actives avec leurs valeurs par défaut, et elles le disent. Le rappel avant commit refuse aussi un commit qui touche une migration, une fonction déployée à part, une variable d'environnement lue par le code ou une tâche planifiée : si vous ne voulez pas de ce rappel, éteignez-le, ou retirez les catégories qui ne vous concernent pas (voir [Gardes](#gardes)). Codex : `node scripts/installer-codex.js --appliquer` ajoute les nouveaux hooks, puis approuvez-les dans Codex.
 - 0.7.0, liste de travail : la mention complète n'est plus annulée par un mot de travail non fini d'une autre proposition de la ligne (et « non terminée », « à vérifier » avec accent ou au féminin sont reconnus) ; un commit est lu après `Set-Location`, `cd` ou `$d = '...'; git -C $d`, et un commit fait par un script est lu par la ligne que git écrit ; un commit sans mention est dit tout de suite ; les preuves « partiel » sont comptées et rappelées toutes les cinq ; le commit d'un sous-agent est annoncé à l'agent principal sans rien fermer ; la demande de message suggéré de Codex n'est plus un message de l'utilisateur ; `ajouter` avertit d'une ligne qui porte plusieurs travaux, d'une réponse de questionnaire ou d'une consigne ; les fichiers temporaires d'écritures interrompues de plus d'une heure sont retirés au démarrage ; le rapport de fin d'un sous-agent, que l'application remet comme un tour de l'utilisateur (balise `agent-message`), ne reçoit plus de numéro M, et suit une nouvelle ligne si celle du sous-agent est close ; un sous-agent relancé après la clôture de sa ligne est suivi de nouveau (Claude Code : le hook d'après outil écoute aussi l'envoi de message à un agent, `SendMessage`), au lieu de voir son second rapport écarté ; un sous-agent fini dont le résultat n'est pas prouvé traité est redit en entier, avec le chemin de son résultat, à chaque nouveau message de l'utilisateur, au démarrage, à la reprise, avec la liste redonnée après un compactage et à l'arrivée d'un rapport (jamais sur un simple outil) ; la garde de lecture des sous-agents analyse les scripts de lecture (boucles, affectations, méthodes de lecture, `git` en lecture) ; la copie de secours est asynchrone (un travailleur détaché la fait ; `CONTEXT_LEDGER_SECOURS_SYNCHRONE=1` rend l'ancien comportement). Mémoire : les écritures du journal et du résumé passent sous un verrou, par remplacement atomique, et en une transaction rejouée si elle est interrompue ; le démarrage rappelle les 25 entrées les plus récentes par horodatage (et non les 25 premières lignes) ; le marqueur de travail non documenté compte les éditions et les fichiers distincts, et ignore une écriture échouée ; un point de contrôle ou un état avant compactage n'est écrit qu'une fois par minute. Rien à refaire : les fichiers existants restent lisibles (un marqueur ancien, sans liste de fichiers, s'affiche « fichiers distincts inconnus »).
 - Claude Code : mettez le plugin à jour ; les deux nouveaux hooks (démarrage d'un sous-agent, après compactage) sont actifs à la session suivante.
@@ -319,8 +322,17 @@ Ce dépôt dit ce qui a été mesuré, et ce qui ne l'a pas été.
 | `tests/gardes-securite.test.js` | 31 | garde de sécurité : chaque règle de refus, de confirmation et d'avertissement avec son cas voisin qui passe, options globales de git et alias, poussées enveloppées, here-documents, ordre de l'utilisateur chez Codex, analyse impossible, réglage, sorties validées contre le schéma de codex-cli 0.155, sortie en panne, hooks et installateur ; 30 mutations |
 | `tests/gardes-checklist.test.js` | 15 | rappel avant commit sur de vrais dépôts git temporaires : détection, refus, confirmation, caducité du diff, worktree, hook git natif réel, vérification en panne, réglage ; 12 mutations |
 | `tests/gardes-caracteres.test.js` | 16 | garde des caractères : chaque code de la liste, exceptions, Edit et patch, lignes de commande, fin de tour (transcription, anti-boucle, schéma de Stop), réglage ; 14 mutations |
+| `tests/config-logique.test.js` | 42 | réglages du Cockpit (worktrees suivis, dossier des plans) et leur commande ; 171 mutations |
+| `tests/regulateur-logique.test.js` | 41 | plafond d'agents, pause, relance, rappels ; 76 mutations |
+| `tests/file-logique.test.js` | 78 | file d'attente des agents : mise en file, ordre, relances, purge, textes ; 268 mutations |
+| `tests/consignes-logique.test.js` | 61 | consignes permanentes et verrous (poussée, déploiement, build mobile, agent) ; 248 mutations |
+| `tests/nuit-logique.test.js` | 176 | absence de l'utilisateur : boîte de questions, arrêts de garde, enchaînement, récapitulatif ; 611 mutations |
+| `tests/pause-logique.test.js` | 49 | pause coopérative des sessions et des agents ; 235 mutations |
+| `tests/quota-logique.test.js` | 68 | fenêtres de quota, alertes, blocage, consigne, remise à zéro ; 163 mutations |
+| `tests/modeles-agents-logique.test.js` | 4 | modèle imposé aux prochains sous-agents |
+| `tests/mutations-fichier.test.js` | 7 | moteur commun des mutations : refuse un `require` relatif non réécrit |
 
-Plus de cent quarante mutations y sont jouées (dont 56 pour les gardes : 30, 12 et 14) : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien. Les bancs qui tiennent un verrou le posent à la première tentative du processus testé, pas avant son lancement, et ceux qui lancent dix processus à la fois vérifient que rien n'est perdu plutôt que tout aboutisse du premier coup : sous forte charge, node démarrait après la fin du verrou et une mutation restait verte, ou un message partait en copie de secours et le banc était rouge à tort. Les délais des processus qu'un banc lance sont des garde-fous larges, pas des mesures : une relance de contrôle qui demande cent secondes au repos dépassait trois minutes sous charge.
+Plus de cent quarante mutations y sont jouées pour la mémoire, la liste de travail et les gardes (dont 56 pour les gardes : 30, 12 et 14), et 1 772 pour les logiques du Cockpit (`npm run test:mutations`) : on casse volontairement une protection dans une copie du code (la garde, le dédoublonnage, le rappel, la restauration...) et le banc correspondant doit devenir rouge. Un banc qui reste vert quand le code est cassé ne prouve rien. Les bancs qui tiennent un verrou le posent à la première tentative du processus testé, pas avant son lancement, et ceux qui lancent dix processus à la fois vérifient que rien n'est perdu plutôt que tout aboutisse du premier coup : sous forte charge, node démarrait après la fin du verrou et une mutation restait verte, ou un message partait en copie de secours et le banc était rouge à tort. Les délais des processus qu'un banc lance sont des garde-fous larges, pas des mesures : une relance de contrôle qui demande cent secondes au repos dépassait trois minutes sous charge.
 
 **En conditions réelles** :
 
@@ -347,6 +359,7 @@ Si vous constatez un écart, ouvrez un ticket avec le payload du hook : c'est lu
 ```
 npm test                      # tous les bancs ; long, chaque hook testé est un vrai processus (une demi-heure sur une machine chargée)
 npm run test:rapide           # sans les mutations
+npm run test:mutations        # les sept scripts de mutation des logiques du Cockpit, l'un après l'autre ; très long
 node --test tests/memoire.test.js
 ```
 
@@ -387,6 +400,7 @@ Les deux vérifient aussi la version du plugin : la même dans le manifeste, dan
 ## Autres documents
 
 - [docs/PROTOCOLE-MEMOIRE.md](docs/PROTOCOLE-MEMOIRE.md) : où vit la mémoire, formats, règles.
+- [docs/COCKPIT-ET-MODULES.md](docs/COCKPIT-ET-MODULES.md) : ce que sont le Cockpit et ses modules, ce qui est dans le dépôt à ce stade (les logiques pures), ce qui vient ensuite.
 - [docs/REGLES-POUR-AGENTS.md](docs/REGLES-POUR-AGENTS.md) : le bloc à copier dans vos instructions.
 - [docs/GABARIT-BRIEF-SOUS-AGENT.md](docs/GABARIT-BRIEF-SOUS-AGENT.md) : un brief qui fait démarrer un sous-agent vite et rend compte de ce qu'il a lu.
 
