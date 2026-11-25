@@ -349,6 +349,14 @@ function surUserPromptSubmit(input) {
     sortir('UserPromptSubmit', [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join('\n'));
     return;
   }
+  // Texte soumis par une machine (demande générée par l'application) : ce n'est pas un message de l'utilisateur,
+  // rien à trier. Les messages en file et le suivi des sous-agents sont traités quand même.
+  if (core.texteDeMachine(prompt)) { // ancre-mutation:machine-non-enregistree
+    let file = { ids: [], messages: [], echecs: [], projet: null };
+    try { file = rattraperMessagesEnFile(input); } catch (_) { /* rien */ }
+    sortir('UserPromptSubmit', [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join('\n'));
+    return;
+  }
   try { core.assurerVues(AGENT); } catch (_) { /* l'enregistrement du message passe avant tout */ }
   // Messages restés en file pendant le tour précédent : enregistrés d'abord (ordre chronologique des M).
   let file = { ids: [], messages: [], echecs: [], projet: null };
@@ -398,6 +406,7 @@ function surUserPromptSubmit(input) {
 }
 
 function surSessionStart(input) {
+  try { core.nettoyerTemporaires(); } catch (_) { /* au prochain démarrage */ }
   try { reconcilierContenu(); } catch (_) { /* prochain evenement */ }
   const projet = core.lierSession(AGENT, input.session_id, input.cwd);
   let file = { ids: [], echecs: [], projet: null };
@@ -455,17 +464,21 @@ function surPostToolUse(input) {
   }
   const p = core.preuvesDepuisOutil({
     toolName: input.tool_name, toolInput: input.tool_input, toolResponse: input.tool_response, cwd: input.cwd,
+    avecCommitNu: true,
   });
-  let resultat = p ? core.appliquerPreuves({ agent: AGENT, marqueurs: p.marqueurs, preuve: p.preuve }) : null;
+  let resultat = p && p.marqueurs.length ? core.appliquerPreuves({ agent: AGENT, marqueurs: p.marqueurs, preuve: p.preuve }) : null;
   try {
     const r = reconcilierContenu();
     if (!resultat) resultat = r;
-    else for (const k of ['faits', 'partiels', 'ignores', 'projets']) resultat[k] = [...new Set([...resultat[k], ...r[k]])];
+    else for (const k of ['faits', 'partiels', 'ignores', 'projets', 'insistants']) resultat[k] = [...new Set([...(resultat[k] || []), ...(r[k] || [])])];
   } catch (_) { /* la file durable sera rejouee */ }
   const preuve = p ? p.preuve : 'fichier de preuve (historique ou memoire)';
   if (resultat && !resultat.faits.length && !resultat.partiels.length) resultat = null;
+  // Commit sans aucune mention : dit tout de suite, c'est le moment où une ligne se ferme ou reste ouverte.
+  let commitNu = '';
+  if (p && p.nu) { try { commitNu = core.texteCommitNu({ agent: AGENT, sessionId: input.session_id, court: p.court }); } catch (_) { commitNu = ''; } } // ancre-mutation:rappel-commit-nu
   // Après les preuves : un résultat que cet outil vient de prouver traité n'est plus annoncé.
-  const courts = [suivi, suiviEnCours(input)].filter(Boolean).join('\n');
+  const courts = [suivi, commitNu, suiviEnCours(input)].filter(Boolean).join('\n');
   const enFile = texteMessagesEnFile(file);
   // Filet d'après compactage : SessionStart n'a pas redonné la liste (échec ou délai), ce premier outil la redonne.
   if (reinjectionDue(input.session_id)) {
@@ -489,6 +502,7 @@ function surPostToolUse(input) {
     courts,
     resultat && resultat.faits.length ? `Retiré sur preuve (${preuve}) : ${resultat.faits.join(', ')}.` : '',
     resultat && resultat.partiels.length ? `Passé en-cours (partiel, ${preuve}) : ${resultat.partiels.join(', ')}.` : '',
+    core.texteInsistants(resultat),
     enFile,
   ].filter(Boolean).join('\n');
   const dernier = file.ids[file.ids.length - 1];
@@ -594,8 +608,20 @@ function surSubagentStart(input) {
 
 // Événement venu d'un sous-agent. Jamais la liste de l'orchestrateur (défaut mesuré le 2026-10-02 : elle
 // lui était injectée après son compactage) : sa fiche, rendue quand son contexte vient d'être compacté.
+// Commit fait par un sous-agent : noté dans la session de l'orchestrateur, qui en est prévenu à son prochain
+// événement. Rien n'est fermé ici : le parent vérifie et ferme par sa preuve.
+function noterCommitsDuSousAgent(input, id) {
+  if (input.hook_event_name !== 'PostToolUse' || !core.OUTILS_SHELL.includes(input.tool_name)) return;
+  const ti = input.tool_input || {};
+  const commande = ti.command || ti.script || ti.input || ti.cmd;
+  if (typeof commande !== 'string' || !commande) return;
+  const commits = core.commitsDeLOutil({ commande, toolResponse: input.tool_response, cwd: ti.workdir || ti.cwd || input.cwd });
+  if (commits.length) core.noterCommitsSousAgent({ agent: AGENT, sessionId: input.session_id, id, commits }); // ancre-mutation:commit-sous-agent
+}
+
 function surEvenementSousAgent(input, id) {
   const evenement = input.hook_event_name;
+  try { noterCommitsDuSousAgent(input, id); } catch (_) { /* le sous-agent continue, son commit sera vu dans son rapport */ }
   if (id === 'inconnu' || !['SessionStart', 'PostToolUse', 'UserPromptSubmit', 'PostCompact'].includes(evenement)) return;
   let index = null;
   try { index = assurerFiche(input, id); } catch (_) { index = null; }

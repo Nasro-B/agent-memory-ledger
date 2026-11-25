@@ -434,6 +434,89 @@ describe('adaptateur Codex', CONCURRENCE, () => {
     assert.equal(etat(d).lignes[c2].statut, 'fait');
   });
 
+  // Un commit sans mention ne ferme rien, et rien ne le disait.
+  test('commit SANS mention : le modèle est prévenu, la ligne reste ouverte ; avec la mention elle se ferme', async () => {
+    const d = dossier('commit-nu');
+    const repo = path.join(d, 'depot');
+    const sansHooks = path.join(d, 'sans-hooks');
+    fs.mkdirSync(repo, { recursive: true });
+    fs.mkdirSync(sansHooks, { recursive: true });
+    const git = args => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git(['init', '-q']);
+    git(['config', 'core.hooksPath', sansHooks]);
+    git(['config', 'user.name', 'banc']);
+    git(['config', 'user.email', 'banc@example.invalid']);
+    const { c } = await preparer(d);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+    git(['add', 'a.txt']);
+    git(['commit', '-q', '-m', 'fix(banc): sans mention']);
+    const r = await hook(d, payload('PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: 'git commit -m "fix(banc): sans mention"', workdir: repo }, tool_response: { output: 'ok' },
+    }));
+    assert.match(ctx(r), /ne porte aucune mention \[ctx\]/);
+    assert.match(ctx(r), /1 ligne\(s\) de cette conversation/);
+    assert.equal(etat(d).lignes[c].statut, 'ouvert', 'le rappel ne ferme rien');
+    // Le dossier du commit donné par un changement de dossier, et non par workdir : la mention est lue quand même.
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+    git(['add', 'b.txt']);
+    git(['commit', '-q', '-m', `fix(banc): avec mention [ctx ${c}]`]);
+    const f = await hook(d, payload('PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: `Set-Location '${repo}'; git commit -m "fix(banc): avec mention [ctx ${c}]"` }, tool_response: { output: 'ok' },
+    }));
+    assert.doesNotMatch(ctx(f), /ne porte aucune mention/);
+    assert.equal(etat(d).lignes[c].statut, 'fait');
+  });
+
+  // Un commit fait par un script ne contient pas « git commit » : sa sortie (« [branche sha] titre ») le donne.
+  test('commit d un sous-agent : noté pour l agent racine, rien n est fermé ; commit fait par un script : lu par la sortie de git', async () => {
+    const d = dossier('commit-script');
+    const repo = path.join(d, 'depot');
+    const sansHooks = path.join(d, 'sans-hooks');
+    fs.mkdirSync(repo, { recursive: true });
+    fs.mkdirSync(sansHooks, { recursive: true });
+    const git = args => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git(['init', '-q']);
+    git(['config', 'core.hooksPath', sansHooks]);
+    git(['config', 'user.name', 'banc']);
+    git(['config', 'user.email', 'banc@example.invalid']);
+    const { c } = await preparer(d);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+    git(['add', 'a.txt']);
+    git(['commit', '-q', '-m', `fix(banc): par le sous-agent [ctx ${c}]`]);
+    const court = git(['rev-parse', '--short=7', 'HEAD']).trim();
+    await hook(d, payload('PostToolUse', {
+      agent_id: 'ag-9', agent_type: 'worker', tool_name: 'Bash', tool_input: { command: 'git commit -m "x"', workdir: repo }, tool_response: { output: 'ok' },
+    }));
+    assert.equal(etat(d).lignes[c].statut, 'ouvert', 'le commit d un sous-agent ne ferme pas la ligne de l agent racine');
+    const r = await hook(d, payload('PostToolUse'));
+    assert.match(ctx(r), /Commit\(s\) fait\(s\) par un sous-agent, à rapprocher de ta liste \(1\)/);
+    assert.ok(ctx(r).includes(court), 'le SHA court est donné');
+    assert.ok(ctx(r).includes(`mentionne ${c} (NON appliquée)`));
+    assert.doesNotMatch(ctx(await hook(d, payload('PostToolUse'))), /Commit\(s\) fait\(s\) par un sous-agent/, 'dit une seule fois');
+    // L'agent racine lance un script qui commite : aucune commande « git commit », la sortie de git donne le SHA.
+    const script = path.join(repo, 'commiter.ps1');
+    fs.writeFileSync(script, '# script du banc\n');
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+    git(['add', 'b.txt']);
+    git(['commit', '-q', '-m', `fix(banc): par le script [ctx ${c}]`]);
+    const court2 = git(['rev-parse', '--short=7', 'HEAD']).trim();
+    const f = await hook(d, payload('PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: `pwsh -NoProfile -File '${script}'` }, tool_response: { output: `[main ${court2}] fix(banc): par le script\n 1 file changed\n` },
+    }));
+    assert.equal(etat(d).lignes[c].statut, 'fait');
+    assert.match(etat(d).lignes[c].preuve, /^commit [0-9a-f]{40}/);
+    assert.match(ctx(f), new RegExp(c));
+  });
+
+  test('texte de machine (message suggéré par l application) : aucun message à trier n est créé', async () => {
+    const d = dossier('machine');
+    await hook(d, payload('UserPromptSubmit', { prompt: 'This is an app-generated request for a suggested next user message. The user did not write this message. Your reply is shown as a suggestion.' }));
+    assert.equal(etat(d), null, 'aucun état : rien n a été enregistré');
+    const r = await hook(d, payload('UserPromptSubmit', { prompt: 'corrige le bug du formulaire', turn_id: 'turn-2' }));
+    assert.ok(nouveauM(r), 'un vrai message reçoit son numéro');
+    assert.equal(Object.keys(etat(d).demandes).length, 1);
+  });
+
   test('ligne effacée à la main du .md -> restaurée au passage suivant', async () => {
     const d = dossier('restauration');
     const { c } = await preparer(d);
@@ -1163,6 +1246,13 @@ const MUTATIONS = [
   // Shell des commandes : supposé PowerShell partout, ou shell nommé par l'appel ignoré.
   { nom: 'shell-par-defaut', motif: '^garde : sous-agent : son rapport', transformer: s => s.replace(/return e \? RE_POWERSHELL\.test\(e\) : process\.platform === 'win32'; \/\/ ancre-mutation:shell-par-defaut/, 'return true; // mutation') },
   { nom: 'shell-nomme', motif: '^garde : sous-agent : son rapport', transformer: s => s.replace(/const powershell = [^\n]*\/\/ ancre-mutation:shell-nomme/, 'const powershell = shellParDefautPowerShell(); // mutation') },
+  // Texte de machine enregistré comme un message ; commit sans mention jamais retenu ni dit ; commits lus seulement
+  // par « git commit » (jamais par la sortie d'un script) ; commits des sous-agents jamais notés.
+  { nom: 'machine-codex', motif: '^texte de machine', transformer: s => s.replace(/const machine = [^\n]*\/\/ ancre-mutation:machine-codex/, 'const machine = false; // mutation') },
+  { nom: 'commit-nu-codex', motif: '^commit SANS mention', transformer: s => s.replace(/if \(!marqueurs\.length && [^\n]*\/\/ ancre-mutation:commit-nu-codex/, '// mutation') },
+  { nom: 'rappel-commit-nu-codex', motif: '^commit SANS mention', transformer: s => s.replace(/const fins = \[rappelCommitNu[^\n]*\/\/ ancre-mutation:rappel-commit-nu-codex/, 'const fins = suiviEnCours(input); // mutation') },
+  { nom: 'commits-sortie-codex', motif: '^commit d un sous-agent', transformer: s => s.replace('? core.commitsDeLOutil({ commande: cmd, toolResponse: reponse, cwd }) // ancre-mutation:commits-sortie-codex', '? [core.preuveCommit({ commande: cmd, cwd })].filter(Boolean) // mutation') },
+  { nom: 'commit-sous-agent-codex', motif: '^commit d un sous-agent', transformer: s => s.replace(/if \(commits\.length\) core\.noterCommitsSousAgent\([^\n]*\/\/ ancre-mutation:commit-sous-agent-codex/, '// mutation') },
   { nom: 'reconciliateur', motif: 'preuve par contenu|réconciliateur|CRLF', transformer: s => s.replace(/const r = core\.reconcilier\(\{ agent: AGENT, base: basePreuves\(\) \}\);/, 'const r = { faits: [], partiels: [], ignores: [], projets: [] };') },
 ];
 

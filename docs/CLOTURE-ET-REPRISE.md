@@ -31,6 +31,17 @@ La commande exige un vrai fichier texte, le statut, le marqueur et une déclarat
 
 Si une mission interdit toute écriture de suivi hors de son dossier, respecter cette interdiction. Ne pas déplacer la preuve ni forcer une écriture dans le registre. Dire ce qui reste à enregistrer ; un rappel inchangé ne bloque plus chaque fin de tour.
 
+## Ce qui ferme une ligne, et ce qui la laisse ouverte
+
+Une ligne ne se ferme que par une mention complète `[ctx C-NNNN]` lue par le hook, ou par le reçu de `traiter`. Les pièges :
+
+- **Mot de travail non fini dans la même proposition.** « en cours », « à faire », « à vérifier », « à traiter », « non fait », « non vérifié », « non traité », « non terminé », « pas fait », « pas fini », « pas terminé » (avec ou sans accent, au féminin et au pluriel, en mot entier) annulent une mention complète quand ils sont dans SA proposition : entre deux « ; », deux points suivis d'une espace, ou deux « | ». Un autre mot, dans une autre proposition de la même ligne, ne l'annule pas. Mettre la mention dans une proposition à elle, en fin de titre. Une mention « partiel » n'est jamais annulée.
+- **Commit non lu.** Le message d'un commit n'est lu que si le hook retrouve le dépôt : `git -C <dépôt> commit`, `cd <dépôt> && git commit`, `Set-Location '<dépôt>'; git commit`, `$d = '<dépôt>'; git -C $d commit`, et, pour un script qui commite (la commande ne contient pas `git commit`), la ligne que git écrit sur la sortie (`[branche 1a2b3c4] titre`), le commit étant cherché par ce SHA parmi les chemins cités par la commande et le dossier courant, dans les 30 minutes. Un commit lancé en silence (`-q`) dans un script, ou avec `--amend`, n'est pas lu : écrire la mention dans l'historique.
+- **Commit sans mention.** Il ne ferme rien. Le hook le dit tout de suite quand la conversation a des lignes ouvertes ; répondre par la mention complète si le commit termine la ligne, partielle sinon.
+- **Commit d'un sous-agent.** Il ne ferme jamais une ligne du parent, même avec une mention. Il est noté dans la session du parent, annoncé une fois à son prochain événement (dépôt, titre, mentions lues, « NON appliquée »), et le parent lit le diff, vérifie, puis cite lui-même la mention.
+- **« Partiel » sans fin.** Chaque preuve partielle est comptée sur la ligne ; à la cinquième, la dixième, la quinzième, le hook rappelle d'écrire ce qui reste dans la note (`etat C-NNNN en-cours "reste : ..."`), ou de fermer la partie faite par une mention complète et d'ouvrir une ligne neuve pour le reste.
+- **Une ligne qui porte plusieurs travaux.** Elle n'est jamais entièrement faite. `ajouter` avertit (sans refuser) quand une ligne de plus de 400 caractères reprend le message entier ou compte quatre phrases et plus, quand le message d'origine est une réponse de questionnaire, ou quand la ligne ressemble à une consigne.
+
 ## Sources de preuve
 
 Les appels d'outils servent à retrouver une commande et son résultat, pas à déduire qu'un fichier a été lu ou qu'une tâche est faite. L'historique Git relie un changement à une révision. La mémoire et l'historique de travail décrivent la vérification et ses limites. Consulter les sources pertinentes à l'item ; ne pas rescanner tous les rollouts et tous les commits à chaque tour.

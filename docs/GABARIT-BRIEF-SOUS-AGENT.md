@@ -54,7 +54,7 @@ Décision déjà prise par l'utilisateur : ...
 - Pas de push, pas de déploiement.
 - Pas d'action sur un système réel (migration appliquée, variable posée, tâche planifiée activée) : tu écris les fichiers, l'orchestrateur applique.
 - Tu ne modifies pas la liste de travail (fichier contexte) : pas de `ajouter`, `etat`, `sans-travail` ni `abandon`. Tu rends ton résultat, l'orchestrateur la met à jour (section 2 bis : ce qui t'est ouvert).
-- Commit avec la liste explicite de tes seuls fichiers.
+- Commit avec la liste explicite de tes seuls fichiers. Ton commit ne ferme aucune ligne de l'orchestrateur, même si son message porte `[ctx C-NNNN]` : l'orchestrateur en est prévenu, lit ton diff, vérifie, puis cite lui-même la mention. Écris dans ton rapport quelles lignes ton commit termine.
 
 ## 6. Fin et rapport
 

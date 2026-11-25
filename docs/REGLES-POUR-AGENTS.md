@@ -25,6 +25,23 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   fichier doit porter `statut: traite` et le marqueur exact. Un résultat partiel reste actif ; une livraison
   rejetée exige `--reste C-NNNN` pointant un travail ouvert. Ne jamais assimiler livraison traitée et mission
   entièrement résolue.
+- La mention complète se lit seule dans sa proposition : un mot de travail non fini (« en cours », « à faire »,
+  « à vérifier », « non vérifié », « pas fini »...) dans la même proposition (entre deux « ; », points suivis
+  d'une espace ou « | ») l'annule. Mets-la dans une proposition à elle, en fin de titre. Une citation
+  (ligne commençant par `>`) ou « exemple : » est ignorée.
+- Un commit ne ferme une ligne que si SON MESSAGE porte la mention. Il est lu sous les formes `git -C <dépôt>
+  commit`, `cd <dépôt> && git commit`, `Set-Location '<dépôt>'; git commit`, `$d = '<dépôt>'; git -C $d commit`,
+  et, pour un script qui commite, par la ligne que git écrit (`[branche 1a2b3c4] titre`). Pas lus : un commit
+  lancé en silence (`-q`) dans un script, et `--amend` : écris alors la mention dans l'historique. Après un
+  commit sans mention, le hook le dit : réponds aussitôt par `[ctx C-NNNN]` ou `[ctx C-NNNN partiel]`.
+- Le commit d'un sous-agent ne ferme jamais une ligne, même avec une mention : tu en es prévenu une fois. Lis son
+  diff, vérifie, puis cite toi-même `[ctx C-NNNN]` dans l'historique.
+- Une ligne citée « partiel » cinq, dix, quinze fois déclenche un rappel : écris ce qui reste dans sa note
+  (`etat --projet P C-NNNN en-cours "reste : ..."`), ou ferme la partie faite par une mention complète et ouvre
+  une ligne neuve pour le reste.
+- Une ligne PAR travail : ne recopie pas un message entier en une seule ligne. Une contrainte (« ne lance aucun
+  sous-agent ») ou une réponse de questionnaire n'est pas un travail à finir : respecte-la, classe-la
+  (`sans-travail`) et note la décision dans la mémoire du projet. `ajouter` avertit dans ces cas, sans refuser.
 - Jamais de modification à la main du dossier `contexte`. Une ligne n'est abandonnée que sur citation exacte
   d'un message de l'utilisateur écrit APRÈS la création de la ligne (commande `abandon`).
 - Sous-agents : chaque sous-agent lancé reçoit une ligne `[agent]`, marquée « TERMINÉ, résultat à traiter » à
@@ -93,6 +110,7 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
 Elles viennent de pannes mesurées, pas de préférences :
 
 - Une liste gardée dans la conversation disparaît au compactage. Sur disque, avec une preuve exigée pour retirer une ligne, elle ne disparaît plus.
+- Mesuré sur l'installation d'origine : aucune ligne citée par une mention complète que le hook avait lue n'est restée ouverte. Celles qui restaient ouvertes l'étaient faute de mention complète : mention absente, annulée par un mot de travail non fini dans sa proposition, écrite dans un commit que le hook ne lisait pas (autre dossier, script), ou seulement « partiel ». D'où les règles ci-dessus.
 - Un message envoyé pendant qu'un agent travaille pouvait ne jamais être traité. Il est maintenant enregistré, trié, rappelé.
 - Dans une session réelle, 443 sous-agents ont fini, 301 pendant que l'orchestrateur faisait autre chose, et pour 248 il n'est jamais revenu dessus. Une notification passe une fois ; une ligne de travail reste jusqu'à la preuve.
 - En une nuit de travail réelle, 22 sous-agents ont vu leur contexte compacté de une à sept fois. Sans fiche, ils n'avaient que le résumé pour retrouver leur mission ; et quand ils voulaient recouper un constat avec la liste, la garde leur refusait jusqu'à la lecture. Depuis : une fiche par sous-agent, et la liste en lecture seule.

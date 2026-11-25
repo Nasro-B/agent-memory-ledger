@@ -256,11 +256,12 @@ function basePreuves() {
   return e && e.trim() ? path.resolve(e.trim()) : config.maison();
 }
 
-function vide() { return { faits: [], partiels: [], ignores: [], projets: [], preuves: [] }; }
+// insistants : lignes citées « partiel » une fois de plus (multiple de cinq) ; nus : commits sans aucune mention.
+function vide() { return { faits: [], partiels: [], ignores: [], projets: [], preuves: [], insistants: [], nus: [] }; }
 
 function fusionner(total, r, preuve) {
   if (!r) return total;
-  for (const k of ['faits', 'partiels', 'ignores', 'projets']) {
+  for (const k of ['faits', 'partiels', 'ignores', 'projets', 'insistants', 'nus']) {
     for (const x of r[k] || []) if (!total[k].includes(x)) total[k].push(x);
   }
   if (preuve && ((r.faits || []).length || (r.partiels || []).length) && !total.preuves.includes(preuve)) total.preuves.push(preuve);
@@ -308,17 +309,40 @@ function preuvesCommit(input) {
   if (!a.commandes.length) return total;
   const cwd = a.dossiers[0] || input.cwd;
   const vus = new Set();
-  for (const cmd of a.commandes) {
-    if (!/\bcommit\b/.test(cmd)) continue;
-    const c = core.preuveCommit({ commande: cmd, cwd });
-    if (!c || vus.has(c.sha)) continue;
+  for (const c of commitsDe(a, input.tool_response, cwd)) {
+    if (vus.has(c.sha)) continue;
     vus.add(c.sha);
     const marqueurs = core.extraireMarqueurs(c.message);
+    // Commit sans aucune mention : retenu pour le dire au modèle (une mention écrite mais écartée n'est pas un oubli).
+    if (!marqueurs.length && !/\[ctx\s/i.test(c.message)) total.nus.push(c.court); // ancre-mutation:commit-nu-codex
     if (!marqueurs.length) continue;
     const preuve = `commit ${c.sha} (${c.racineDepot})`;
     fusionner(total, core.appliquerPreuves({ agent: AGENT, marqueurs, preuve }), preuve);
   }
   return total;
+}
+
+// Commits que cet appel d'outil vient de faire : un « git commit » direct, sinon ceux que sa sortie annonce (un
+// script qui commite ne contient pas « git commit »). Noyau : commitsDeLOutil.
+function commitsDe(a, reponse, cwd) {
+  const out = [];
+  for (const cmd of a.commandes) {
+    const liste = typeof core.commitsDeLOutil === 'function'
+      ? core.commitsDeLOutil({ commande: cmd, toolResponse: reponse, cwd }) // ancre-mutation:commits-sortie-codex
+      : (/\bcommit\b/.test(cmd) ? [core.preuveCommit({ commande: cmd, cwd })] : []);
+    for (const c of liste) if (c && !out.some(x => x.sha === c.sha)) out.push(c);
+  }
+  return out;
+}
+
+// Commit fait par un sous-agent : noté dans la session de l'agent racine, qui en est prévenu à son prochain
+// événement. Rien n'est fermé ici : l'agent racine vérifie et ferme par sa preuve.
+function noterCommitsDuSousAgent(input) {
+  if (input.hook_event_name !== 'PostToolUse' || !input.session_id || typeof core.noterCommitsSousAgent !== 'function') return;
+  const a = analyser(String(input.tool_name || ''), input.tool_input);
+  if (!a.commandes.length) return;
+  const commits = commitsDe(a, input.tool_response, a.dossiers[0] || input.cwd);
+  if (commits.length) core.noterCommitsSousAgent({ agent: AGENT, sessionId: input.session_id, id: String(input.agent_id || input.agent_type), commits }); // ancre-mutation:commit-sous-agent-codex
 }
 
 function a_change(r) { return r.faits.length > 0 || r.partiels.length > 0; }
@@ -327,7 +351,15 @@ function ligneResultat(r) {
   const out = [];
   if (r.faits.length) out.push(`Retiré sur preuve (${r.preuves.join(' ; ')}) : ${r.faits.join(', ')}.`);
   if (r.partiels.length) out.push(`Passé en-cours (partiel) : ${r.partiels.join(', ')}.`);
+  const insistants = typeof core.texteInsistants === 'function' ? core.texteInsistants(r) : '';
+  if (insistants) out.push(insistants);
   return out.join('\n');
+}
+
+// Rappel après un commit sans mention (noyau : texteCommitNu) : '' sans commit nu ou sans ligne ouverte.
+function rappelCommitNu(input, r) {
+  if (!r.nus.length || typeof core.texteCommitNu !== 'function') return '';
+  try { return core.texteCommitNu({ agent: AGENT, sessionId: input.session_id, court: r.nus.join(', ') }); } catch (_) { return ''; }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +469,7 @@ function surSubagentStart(input) {
 // Jamais la liste de l'orchestrateur : sa fiche, rendue quand son contexte vient d'être compacté.
 function surEvenementSousAgent(input) {
   const evenement = input.hook_event_name;
+  try { noterCommitsDuSousAgent(input); } catch (_) { /* le sous-agent continue, son commit sera vu dans son rapport */ }
   if (!input.agent_id || !['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'PostCompact'].includes(evenement)) return;
   const id = String(input.agent_id);
   let index = null;
@@ -517,6 +550,7 @@ function rattraperFins(input) {
 
 function surSessionStart(input) {
   const projet = core.lierSession(AGENT, input.session_id, input.cwd);
+  try { if (typeof core.nettoyerTemporaires === 'function') core.nettoyerTemporaires(); } catch (_) { /* au prochain démarrage */ }
   try { reprendreEnAttente(); } catch (_) { /* rien */ }
   try { rattraperFins(input); } catch (_) { /* rien */ }
   try { reconcilier(); } catch (_) { /* la vue reste injectée */ }
@@ -620,7 +654,9 @@ function signalerEchec(input, m, erreur) {
 function surUserPromptSubmit(input) {
   const prompt = typeof input.prompt === 'string' ? input.prompt : '';
   const debut = prompt.trimStart();
-  const humain = !!prompt.trim() && !PREFIXES_NON_HUMAINS.some(p => debut.startsWith(p));
+  // Texte soumis par une machine (demande « app-generated » de message suggéré) : noyau.
+  const machine = typeof core.texteDeMachine === 'function' && core.texteDeMachine(prompt); // ancre-mutation:machine-codex
+  const humain = !!prompt.trim() && !machine && !PREFIXES_NON_HUMAINS.some(p => debut.startsWith(p));
   let enr = null;
   let enAttente = false;
   if (humain) {
@@ -666,7 +702,8 @@ function surPostToolUse(input) {
   const total = vide();
   try { ajouterResultat(total, reconcilier()); } catch (_) { /* rien */ }
   try { ajouterResultat(total, preuvesCommit(input)); } catch (_) { /* rien */ }
-  const fins = suiviEnCours(input); // après les preuves : un résultat prouvé traité n'est plus annoncé
+  // après les preuves : un résultat prouvé traité n'est plus annoncé ; le commit sans mention est dit tout de suite
+  const fins = [rappelCommitNu(input, total), suiviEnCours(input)].filter(Boolean).join('\n'); // ancre-mutation:rappel-commit-nu-codex
   core.assurerVues(AGENT);
   const drapeau = prendreDrapeau(input.session_id);
   if (!drapeau && !a_change(total)) { // liste renvoyée seulement si elle a changé

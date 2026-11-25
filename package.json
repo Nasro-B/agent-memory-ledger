@@ -12,8 +12,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 tests/anti-boucle.test.js tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
-    "test:rapide": "node --test --test-concurrency=1 --test-skip-pattern=\"^mutation\" tests/anti-boucle.test.js tests/context-ledger-claude.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
+    "test": "node --test --test-concurrency=1 tests/anti-boucle.test.js tests/context-ledger-claude.test.js tests/context-ledger-fermeture.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
+    "test:rapide": "node --test --test-concurrency=1 --test-skip-pattern=\"^mutation\" tests/anti-boucle.test.js tests/context-ledger-claude.test.js tests/context-ledger-fermeture.test.js tests/context-ledger-codex.test.js tests/memoire.test.js tests/verifier-public.test.js",
     "verifier": "node scripts/verifier-public.js"
   }
 }

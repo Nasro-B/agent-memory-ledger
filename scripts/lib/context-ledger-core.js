@@ -137,15 +137,31 @@
  *
  * Preuves
  *   extraireMarqueurs(texte) -> [{id, partiel}]       [ctx C-0012], [ctx C-0012, C-0013], [ctx C-0012 partiel]
+ *        une mention complète est annulée par un mot négatif (« en cours », « à faire », « non fait »...) seulement
+ *        s'il est dans SA proposition (entre deux « ; », points ou « | ») ; « partiel » n'est jamais annulée
  *   marqueursAjoutes(toolName, toolInput, toolResponse) -> marqueurs du texte AJOUTÉ (Write/Edit/MultiEdit)
  *   estFichierPreuve(fichier, base?, cwd?) -> bool    <maison>\history\*.md, <maison>\Memory-Auto.md,
  *                                                     et la mémoire de projet de Claude Code
  *                                                     (~\.claude\projects\*\memory\*.md)
- *   preuveCommit({commande, cwd}) -> {sha, court, message, racineDepot}|null   HEAD frais (<= 90 s)
- *   preuvesDepuisOutil({toolName, toolInput, toolResponse, cwd, base}) -> {marqueurs, preuve}|null
- *   appliquerPreuves({agent, marqueurs, preuve}) -> {faits, partiels, ignores, projets}
- *        seul chemin vers « fait » ; un ID absent des fichiers de CET agent est ignoré
- *   reconcilier({agent, base}) -> {faits, partiels, ignores, projets}
+ *   preuveCommit({commande, cwd}) -> {sha, court, message, racineDepot}|null   HEAD frais (<= 90 s) ; le dépôt est
+ *        cherché dans la commande (git -C, cd, Set-Location, variable affectée à un littéral puis git -C $d)
+ *   commitsDeLOutil({commande, toolResponse, cwd}) -> [{sha, court, message, racineDepot}]
+ *        les commits que cet appel de shell vient de faire : celui d'un « git commit » direct, sinon ceux que la
+ *        SORTIE annonce (« [branche 1a2b3c4] titre », ce qu'écrit git ; un script qui commite ne contient pas
+ *        « git commit ») et que l'on retrouve par leur SHA dans les dépôts cités par la commande
+ *   commitsDepuisSortie, shasDansSortie(texte) -> les deux moitiés de la lecture par la sortie
+ *   preuvesDepuisOutil({toolName, toolInput, toolResponse, cwd, base, avecCommitNu}) -> {marqueurs, preuve}|null
+ *        avecCommitNu : un commit frais sans aucune mention rend {marqueurs: [], preuve, nu: true, court}
+ *   texteCommitNu({agent, sessionId, court}) -> rappel à donner après un commit sans mention ('' sans ligne ouverte)
+ *   appliquerPreuves({agent, marqueurs, preuve}) -> {faits, partiels, ignores, projets, insistants}
+ *        seul chemin vers « fait » ; un ID absent des fichiers de CET agent est ignoré ; insistants : lignes dont
+ *        le compte de preuves partielles atteint un multiple de 5 ; texteInsistants(resultat) -> rappel
+ *   noterCommitsSousAgent({agent, sessionId, id, commits}) -> nombre noté ; texteCommitsAgents(agent, sessionId)
+ *        -> annonce, une seule fois, des commits faits par des sous-agents : ils ne ferment jamais une ligne
+ *   texteDeMachine(texte) -> bool    texte soumis par une machine (demande générée par l'application), pas par l'utilisateur
+ *   nettoyerTemporaires() -> nombre  fichiers .tmp d'écritures interrompues, vieux de plus d'une heure
+ *   avertissementsAjout({projet, agent, texte, de}) -> string[]   conseils rendus par « ajouter » (jamais un refus)
+ *   reconcilier({agent, base}) -> {faits, partiels, ignores, projets, insistants}
  *        réconciliateur PAR CONTENU (agents dont l'outil d'édition est incertain) : relit les fichiers de
  *        preuve dont mtime/taille ont changé et n'applique que les lignes [ctx] apparues depuis le passage
  *        précédent (le tout premier passage sert de base, sans rien appliquer)
@@ -719,6 +735,7 @@ function rejouerJournal(projet, agent) {
           l.statut = 'en-cours';
           l.note = l.note && !/^partiel \(preuve/.test(l.note) ? `${note} ; ${l.note}` : note;
           l.maj = ts;
+          if (!v.cloture) l.partiels = (l.partiels || 0) + 1; // même compte que appliquerPreuves
         }
         break;
       case 'abandon':
@@ -1187,6 +1204,40 @@ function enregistrerMessage({ agent, sessionId, promptId, cwd, texte }) {
   });
 }
 
+// Textes soumis par une machine, que l'événement « message de l'utilisateur » apporte comme s'ils venaient de
+// lui : Codex soumet de lui-même une demande de message suggéré, qui n'est pas un travail à faire. Le début est
+// celui, exact, de la demande de l'application. Un enchaînement automatique d'un outil tiers se traite de la même
+// façon : ajouter son début à cette liste.
+const DEBUTS_DE_MACHINE = [
+  'This is an app-generated request for a suggested next user message.',
+];
+function texteDeMachine(texte) {
+  const debut = chaine(texte).trimStart();
+  return DEBUTS_DE_MACHINE.some(d => debut.startsWith(d)); // ancre-mutation:texte-de-machine
+}
+
+// Fichiers « .tmp » laissés par une écriture atomique interrompue (processus tué entre l'écriture et le
+// renommage). Seuls ceux de la forme écrite par ecrireAtomique (<fichier>.<pid>.<8 hexa>.tmp), vieux de plus d'une
+// heure, sont retirés, dans la racine, .etat et .sessions. Retourne leur nombre.
+const AGE_TEMPORAIRE_MS = 60 * 60 * 1000;
+function nettoyerTemporaires() {
+  let retires = 0;
+  const limite = Date.now() - AGE_TEMPORAIRE_MS;
+  for (const d of [racine(), path.join(racine(), '.etat'), path.join(racine(), '.sessions')]) {
+    for (const n of lireDossier(d)) {
+      if (!/\.\d+\.[0-9a-f]{8}\.tmp$/.test(n)) continue; // ancre-mutation:temporaires-forme
+      const f = path.join(d, n);
+      try {
+        const st = fs.statSync(lp(f));
+        if (!st.isFile() || st.mtimeMs > limite) continue;
+        fs.unlinkSync(lp(f));
+        retires++;
+      } catch (_) { /* déjà parti, ou repris par son écrivain */ }
+    }
+  }
+  return retires;
+}
+
 // Filet : un message de l'utilisateur qu'un incident (verrou, disque) empêche d'enregistrer est gardé ici,
 // sans verrou, et le modèle est prévenu (contexteEchecMessage) : jamais de perte silencieuse.
 function secours({ agent, sessionId, promptId, texte, erreur }) {
@@ -1589,11 +1640,14 @@ function texteSuiviEnCours({ agent, sessionId }) {
   // Signalements d'un autre agent principal sur une ligne de cette liste (boîte de l'agent).
   let agents = '';
   try { agents = texteSignalementsAgents({ agent, sessionId, session: s }); } catch (_) { agents = ''; } // ancre-mutation:signalements-agents
+  // Commits faits par des sous-agents depuis la dernière annonce (suivis ou non par une ligne [agent]).
+  let commits = '';
+  try { commits = texteCommitsAgents(agent, sessionId, s); } catch (_) { commits = ''; } // ancre-mutation:commits-agents-annonce
   const taches = s && estObjet(s.taches) ? s.taches : {};
-  if (!Object.values(taches).some(t => estObjet(t) && !t.clos)) return agents;
+  if (!Object.values(taches).some(t => estObjet(t) && !t.clos)) return [agents, commits].filter(Boolean).join('\n');
   const signalements = texteSignalements(agent, sessionId, taches);
   const fins = texteFinsEtRappel(agent, sessionId, s, taches);
-  return [agents, signalements, fins].filter(Boolean).join('\n');
+  return [agents, commits, signalements, fins].filter(Boolean).join('\n');
 }
 
 // Trouvé dans une session réelle : l'événement de fin du sous-agent marque la fin sans rien dire à
@@ -2086,6 +2140,27 @@ function texteHorsExemples(texte) {
   }).join('\n');
 }
 
+// Proposition qui porte la mention : le morceau de la ligne compris entre deux séparateurs forts (« ; », un point
+// suivi d'une espace, « | » entouré d'espaces). Le filtre des mentions négatives ne doit pas regarder la ligne
+// ENTIÈRE : un titre d'historique « A corrigé ; lint non vérifié ; détail dans X [ctx C-0012] » perdait sa
+// mention complète sans rien dire. Seule la proposition de la mention compte.
+// Mention négative. Les bords de mot sont ceux des lettres accentuées : avec « \b », qui ne connaît que l'ASCII,
+// « non terminé » et « à faire » n'étaient pas reconnus alors que « non termine » et « a faire » l'étaient.
+// Féminin et pluriel compris.
+const RE_MENTION_NEGATIVE = /(?<![\p{L}\p{N}])(?:non[ -](?:termin[eé]|v[eé]rifi[eé]|trait[eé]|fait)e?s?|pas (?:fait|fini|termin[eé])e?s?|en[ -]cours|[aà] (?:faire|v[eé]rifier|traiter))(?![\p{L}\p{N}])/iu;
+
+function propositionAutour(ligne, pos, longueur) {
+  const sep = /;|\.\s|\s\|\s/g;
+  let debut = 0;
+  let fin = ligne.length;
+  let m;
+  while ((m = sep.exec(ligne))) {
+    if (m.index + m[0].length <= pos) debut = m.index + m[0].length;
+    else if (m.index >= pos + longueur) { fin = m.index; break; }
+  }
+  return ligne.slice(debut, fin);
+}
+
 function extraireMarqueurs(texte) {
   const out = [];
   const t = texteHorsExemples(texte);
@@ -2095,8 +2170,8 @@ function extraireMarqueurs(texte) {
     const partiel = !!m[2];
     const debut = t.lastIndexOf('\n', m.index) + 1;
     const fin = t.indexOf('\n', m.index);
-    const ligne = t.slice(debut, fin < 0 ? t.length : fin);
-    if (!partiel && /\b(?:non[ -](?:termin[eé]|v[eé]rifi[eé]|trait[eé]|fait)s?|pas (?:fait|fini|termin[eé])|en[ -]cours|[aà] (?:faire|v[eé]rifier|traiter))\b/i.test(ligne)) continue;
+    const ligne = propositionAutour(t.slice(debut, fin < 0 ? t.length : fin), m.index - debut, m[0].length); // ancre-mutation:filtre-proposition
+    if (!partiel && RE_MENTION_NEGATIVE.test(ligne)) continue;
     for (const id of m[1].match(/C-\d{4,}/gi)) out.push({ id: id.toUpperCase(), partiel });
   }
   return out;
@@ -2156,26 +2231,164 @@ function estFichierPreuve(fichier, base, cwd) {
   return sous(path.join(os.homedir(), '.claude'), /^projects\/[^/]+\/memory\/[^/]+\.md$/);
 }
 
+// Dossiers où le commit a pu être fait, du plus probable au moins probable. resolveCommitTarget ne connaît que
+// « git -C <chemin> » et « cd <chemin> && » en tête de commande. Une session dont le dossier n'est pas le dépôt
+// (plusieurs worktrees pilotés depuis ailleurs) écrit « Set-Location '<dépôt>'; git commit » ou
+// « $d = '<dépôt>'; git -C $d commit » : le dossier lu était alors celui du hook, pas un dépôt, et la mention
+// du commit n'était jamais vue. S'y ajoutent donc : le chemin de -C quand c'est une variable affectée à un
+// littéral, puis les changements de dossier de la commande, du dernier au premier. La fraîcheur du HEAD (90 s)
+// reste la garde : un dossier où rien ne vient d'être commité ne donne aucune preuve.
+function dossiersDuCommit(cmd, gitCwd, hookCwd) {
+  const variables = {};
+  const reAff = /\$([A-Za-z_]\w*)\s*=\s*(?:'([^'\r\n]*)'|"([^"$`\r\n]*)")/g;
+  let m;
+  while ((m = reAff.exec(cmd))) variables[m[1].toLowerCase()] = m[2] !== undefined ? m[2] : m[3];
+  const resoudre = brut => {
+    let v = chaine(brut).replace(/^["']|["']$/g, '');
+    const mv = /^\$([A-Za-z_]\w*)$/.exec(v);
+    if (mv) { v = variables[mv[1].toLowerCase()]; if (v === undefined) return null; }
+    if (!v || /[$`*?]/.test(v)) return null;
+    try { return path.resolve(hookCwd, v); } catch (_) { return null; }
+  };
+  const out = [];
+  const ajouter = d => { if (d && !out.includes(d)) out.push(d); };
+  const mC = /\bgit\s+-C\s+("[^"]+"|'[^']+'|[^\s"']+)/i.exec(cmd);
+  if (mC && /^["']?\$/.test(mC[1])) ajouter(resoudre(mC[1]));
+  // Cible déjà résolue par resolveCommitTarget (-C littéral, ou « cd <chemin> && » en tête) : elle passe d'abord.
+  const resolue = normChemin(gitCwd) !== normChemin(hookCwd);
+  if (resolue) ajouter(gitCwd);
+  const reCd = /(?:^|&&|\|\||[;\r\n(])\s*(?:cd|chdir|pushd|set-location|sl|push-location)\s+(?:-(?:literal)?path\s+)?("[^"]*"|'[^']*'|[^\s;|&()]+)/gi;
+  const cds = [];
+  while ((m = reCd.exec(cmd))) cds.push(resoudre(m[1]));
+  for (const d of cds.reverse()) ajouter(d);
+  ajouter(gitCwd); // sans cible ni changement de dossier : le dossier du hook, comme avant
+  return out;
+}
+
 function preuveCommit({ commande, cwd }) {
   const cmd = chaine(commande);
   if (!cmd) return null;
-  const rc = resolveCommitTarget(cmd, chaine(cwd) || process.cwd());
+  const hookCwd = chaine(cwd) || process.cwd();
+  const rc = resolveCommitTarget(cmd, hookCwd);
   if (!rc.isCommit) return null;
-  const opts = { cwd: rc.gitCwd, encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true };
-  let sortie;
-  try { sortie = execFileSync('git', ['log', '-1', '--format=%ct%x00%H%x00%B'], opts); } catch (_) { return null; }
-  const parts = sortie.split('\0');
-  const ct = Number(parts[0]);
-  const sha = chaine(parts[1]).trim();
-  const message = sansBom(parts.slice(2).join('\0'));
-  const age = Date.now() / 1000 - ct;
-  if (!Number.isFinite(ct) || age > FRAICHEUR_COMMIT_S || age < -5 || !sha) return null;
-  let racineDepot = rc.gitCwd;
-  try { racineDepot = execFileSync('git', ['rev-parse', '--show-toplevel'], opts).trim() || rc.gitCwd; } catch (_) { /* garder gitCwd */ }
-  return { sha, court: sha.slice(0, 7), message, racineDepot };
+  for (const dossier of dossiersDuCommit(cmd, rc.gitCwd, hookCwd)) { // ancre-mutation:commit-dossiers
+    const opts = { cwd: dossier, encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true };
+    let sortie;
+    try { sortie = execFileSync('git', ['log', '-1', '--format=%ct%x00%H%x00%B'], opts); } catch (_) { continue; }
+    const parts = sortie.split('\0');
+    const ct = Number(parts[0]);
+    const sha = chaine(parts[1]).trim();
+    const message = sansBom(parts.slice(2).join('\0'));
+    const age = Date.now() / 1000 - ct;
+    if (!Number.isFinite(ct) || age > FRAICHEUR_COMMIT_S || age < -5 || !sha) continue;
+    let racineDepot = dossier;
+    try { racineDepot = execFileSync('git', ['rev-parse', '--show-toplevel'], opts).trim() || dossier; } catch (_) { /* garder le dossier */ }
+    return { sha, court: sha.slice(0, 7), message, racineDepot };
+  }
+  return null;
 }
 
-function preuvesDepuisOutil({ toolName, toolInput, toolResponse, cwd, base }) {
+// ---------------------------------------------------------------------------
+// Commits annoncés par la SORTIE d'une commande. Un script qui commite (un lanceur de lot, un script de
+// livraison) ne contient pas « git commit » : rien ne le reconnaissait. Mais git écrit « [branche 1a2b3c4] titre »
+// sur la sortie de tout commit qui n'est pas lancé en silence ; cette ligne donne le SHA. Le commit est alors
+// cherché, par ce SHA, dans les dépôts que la commande désigne : ses changements de dossier, le dossier du hook,
+// puis les chemins qu'elle cite. Limite connue : un commit lancé avec -q n'écrit rien, il reste invisible.
+const RE_SORTIE_COMMIT = /^\[([^\]\r\n]{1,200}?)\s([0-9a-f]{7,40})\]\s/gm;
+const MAX_SHAS_SORTIE = 4;
+const MAX_DEPOTS_CANDIDATS = 12;
+const MAX_APPELS_GIT_SORTIE = 16;
+const FRAICHEUR_SORTIE_S = 30 * 60; // le SHA vient de la sortie de CET outil : un script long reste couvert
+const MAX_TEXTE_REPONSE = 400000;
+
+// Texte rendu par un outil shell, quelle que soit sa forme (chaîne, { stdout, stderr }, { output }, blocs).
+function texteDeReponse(toolResponse) {
+  const morceaux = [];
+  const voir = (v, niveau) => {
+    if (typeof v === 'string') morceaux.push(v);
+    else if (Array.isArray(v)) { if (niveau < 3) v.forEach(x => voir(x, niveau + 1)); }
+    else if (estObjet(v) && niveau < 3) for (const x of Object.values(v)) voir(x, niveau + 1);
+  };
+  voir(toolResponse, 0);
+  return morceaux.join('\n').slice(0, MAX_TEXTE_REPONSE);
+}
+
+function shasDansSortie(texte) {
+  const out = [];
+  RE_SORTIE_COMMIT.lastIndex = 0;
+  let m;
+  while ((m = RE_SORTIE_COMMIT.exec(chaine(texte))) && out.length < MAX_SHAS_SORTIE) {
+    if (!out.includes(m[2])) out.push(m[2]); // ancre-mutation:sortie-sha
+  }
+  return out;
+}
+
+// Dossiers où chercher le commit dont la sortie a donné le SHA, du plus probable au moins probable.
+function depotsCandidats(cmd, hookCwd) {
+  const out = [];
+  const ajouter = d => { if (d && out.length < MAX_DEPOTS_CANDIDATS && !out.some(x => normChemin(x) === normChemin(d))) out.push(d); };
+  for (const d of dossiersDuCommit(cmd, hookCwd, hookCwd)) ajouter(d);
+  // Chemins complets cités entre guillemets (ils portent souvent des espaces), puis chemins nus : le dossier
+  // lui-même, ou celui du fichier cité (le script lancé vit souvent dans le dépôt, ou le reçoit en argument).
+  const cites = [];
+  const reCite = /["']([A-Za-z]:[\\/][^"'\r\n<>|*?]+)["']|(?:^|[\s=(])([A-Za-z]:[\\/][^\s"'<>|*?;,)]+)/g;
+  let m;
+  while ((m = reCite.exec(cmd)) && cites.length < 20) cites.push(m[1] || m[2]);
+  for (const c of cites) {
+    try {
+      const st = fs.statSync(lp(c));
+      ajouter(st.isDirectory() ? c : path.dirname(c));
+    } catch (_) { /* chemin qui n'existe pas : ignoré */ }
+  }
+  return out;
+}
+
+// Le commit `sha` lu dans `dossier` : { sha, court, message, racineDepot }, ou null (absent de ce dépôt, trop vieux).
+function commitParSha(dossier, sha) {
+  const opts = { cwd: dossier, encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true };
+  let sortie;
+  try { sortie = execFileSync('git', ['log', '-1', '--format=%ct%x00%H%x00%B', sha], opts); } catch (_) { return null; }
+  const parts = sortie.split('\0');
+  const ct = Number(parts[0]);
+  const complet = chaine(parts[1]).trim();
+  const age = Date.now() / 1000 - ct;
+  if (!Number.isFinite(ct) || !complet.startsWith(sha) || age > FRAICHEUR_SORTIE_S || age < -5) return null; // ancre-mutation:sortie-fraicheur
+  let racineDepot = dossier;
+  try { racineDepot = execFileSync('git', ['rev-parse', '--show-toplevel'], opts).trim() || dossier; } catch (_) { /* garder le dossier */ }
+  return { sha: complet, court: complet.slice(0, 7), message: sansBom(parts.slice(2).join('\0')), racineDepot };
+}
+
+// Commits que la sortie de cet outil annonce : [] sans motif de commit dans la sortie (aucun appel à git).
+function commitsDepuisSortie({ commande, toolResponse, cwd }) {
+  const shas = shasDansSortie(texteDeReponse(toolResponse));
+  if (!shas.length) return [];
+  const hookCwd = chaine(cwd) || process.cwd();
+  const candidats = depotsCandidats(chaine(commande), hookCwd);
+  const out = [];
+  let appels = 0;
+  for (const sha of shas) {
+    for (const d of candidats) {
+      if (appels >= MAX_APPELS_GIT_SORTIE || tempsRestant() < 6000) return out; // un hook tué ne rend rien
+      appels++;
+      const c = commitParSha(d, sha);
+      if (c) { if (!out.some(x => x.sha === c.sha)) out.push(c); break; }
+    }
+  }
+  return out;
+}
+
+// Tous les commits que cet appel d'outil shell vient de faire : celui d'un « git commit » direct, sinon ceux
+// que sa sortie annonce. Sert à l'orchestrateur (preuves) comme aux sous-agents (commits à rapprocher).
+function commitsDeLOutil({ commande, toolResponse, cwd }) {
+  const direct = preuveCommit({ commande, cwd });
+  if (direct) return [direct];
+  return commitsDepuisSortie({ commande, toolResponse, cwd }); // ancre-mutation:commits-par-sortie
+}
+
+// avecCommitNu : rend aussi un commit frais dont le message ne porte AUCUNE mention ({ marqueurs: [], preuve, nu:
+// true, court }) au lieu de null, pour que l'adaptateur le dise au modèle (texteCommitNu). Sans cette option, la
+// forme d'avant : null quand il n'y a rien à appliquer.
+function preuvesDepuisOutil({ toolName, toolInput, toolResponse, cwd, base, avecCommitNu }) {
   const ti = toolInput || {};
   if (OUTILS_FICHIER.includes(toolName)) {
     const f = ti.file_path || ti.notebook_path || ti.path;
@@ -2185,18 +2398,99 @@ function preuvesDepuisOutil({ toolName, toolInput, toolResponse, cwd, base }) {
   }
   if (OUTILS_SHELL.includes(toolName)) {
     const cmd = chaine(ti.command || ti.script || ti.input || ti.cmd);
-    const c = preuveCommit({ commande: cmd, cwd: ti.workdir || ti.cwd || cwd });
-    if (!c) return null;
-    const marqueurs = extraireMarqueurs(c.message);
-    return marqueurs.length ? { marqueurs, preuve: `commit ${c.sha} (${c.racineDepot})` } : null;
+    const commits = commitsDeLOutil({ commande: cmd, toolResponse, cwd: ti.workdir || ti.cwd || cwd });
+    if (!commits.length) return null;
+    // Plusieurs commits (un script qui en fait plusieurs) : leurs mentions s'ajoutent, la preuve les nomme tous.
+    const marqueurs = [];
+    for (const c of commits) marqueurs.push(...extraireMarqueurs(c.message));
+    const preuve = commits.map(c => `commit ${c.sha} (${c.racineDepot})`).join(' ; ');
+    if (marqueurs.length) return { marqueurs, preuve };
+    // Une mention écrite mais écartée (exemple, mention négative) n'est pas un oubli : pas de rappel.
+    return avecCommitNu && !commits.some(c => /\[ctx\s/i.test(c.message)) ? { marqueurs: [], preuve, nu: true, court: commits.map(c => c.court).join(', ') } : null; // ancre-mutation:commit-nu
   }
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Commits des SOUS-AGENTS. Un sous-agent ne ferme jamais une ligne de l'orchestrateur, même par le message de
+// son commit : la règle veut que le parent lise la livraison, la vérifie, puis ferme par SA preuve. Mais ses
+// commits étaient invisibles. Ils sont maintenant notés dans la session de l'orchestrateur et dits à celui-ci, une
+// fois, à son prochain événement (texteSuiviEnCours) : dépôt, titre, mentions lues.
+const MAX_COMMITS_AGENTS = 60;
+
+function noterCommitsSousAgent({ agent, sessionId, id, commits }) {
+  validerAgent(agent);
+  const liste = (commits || []).filter(c => estObjet(c) && c.sha);
+  if (!sessionId || !liste.length) return 0;
+  return reessayer(() => modifierSession(agent, sessionId, s => {
+    s.commitsAgents = Array.isArray(s.commitsAgents) ? s.commitsAgents : [];
+    let ajoutes = 0;
+    for (const c of liste) {
+      if (s.commitsAgents.some(x => x.sha === c.sha)) continue; // ancre-mutation:commit-agent-doublon
+      const mentions = extraireMarqueurs(c.message).map(m => `${m.id}${m.partiel ? ' partiel' : ''}`);
+      s.commitsAgents.push({
+        sha: c.sha, court: c.court, depot: chaine(c.racineDepot), titre: chaine(c.message).split(/\r?\n/)[0].slice(0, 160),
+        mentions: [...new Set(mentions)], par: chaine(id), le: maintenantIso(), annonce: null,
+      });
+      ajoutes++;
+    }
+    s.commitsAgents = s.commitsAgents.slice(-MAX_COMMITS_AGENTS);
+    return ajoutes;
+  }));
+}
+
+// Commits de sous-agents pas encore dits à l'orchestrateur : dits une fois, puis marqués.
+function texteCommitsAgents(agent, sessionId, session) {
+  const s = session || lireSession(agent, sessionId);
+  const attente = s && Array.isArray(s.commitsAgents) ? s.commitsAgents.filter(c => estObjet(c) && !c.annonce) : [];
+  if (!attente.length) return '';
+  try {
+    reessayer(() => modifierSession(agent, sessionId, x => {
+      const iso = maintenantIso();
+      for (const c of Array.isArray(x.commitsAgents) ? x.commitsAgents : []) if (attente.some(a => a.sha === c.sha)) c.annonce = iso;
+    }));
+  } catch (_) { /* redit au prochain événement : mieux qu'un commit jamais dit */ }
+  const taches = s && estObjet(s.taches) ? s.taches : {};
+  const un = c => {
+    const t = taches[c.par];
+    const qui = t ? `${t.ligne} « ${t.titre} »` : `sous-agent ${c.par}`;
+    const mentions = c.mentions.length ? `mentionne ${c.mentions.join(', ')} (NON appliquée)` : 'sans mention';
+    return `${c.court} (${c.depot}) « ${c.titre} », par ${qui}, ${mentions}`;
+  };
+  const plus = attente.length > MAX_LIVRAISONS ? ` ; et ${attente.length - MAX_LIVRAISONS} autre(s)` : '';
+  return `Commit(s) fait(s) par un sous-agent, à rapprocher de ta liste (${attente.length}) : ${attente.slice(0, MAX_LIVRAISONS).map(un).join(' ; ')}${plus}. Le commit d'un sous-agent ne ferme rien : lis son diff, vérifie, puis cite [ctx C-NNNN] dans l'historique pour chaque ligne qu'il termine ([ctx C-NNNN partiel] avec le reste écrit dans sa note, sinon).`;
+}
+
+// Dit au modèle, juste après un commit sans mention : c'est là que la ligne se ferme ou reste ouverte pour
+// toujours. Un commit sans mention ne ferme rien, et rien ne le disait. Un texte, jamais un blocage.
+function texteCommitNu({ agent, sessionId, court }) {
+  let ouvertes = 0;
+  try {
+    const s = lireSession(agent, sessionId);
+    if (s && s.projet) {
+      const e = etatDeSession(lireLedger(s.projet, agent), agent, sessionId);
+      ouvertes = Object.values(e.lignes).filter(l => ['ouvert', 'en-cours'].includes(l.statut) && !/^\[agent\]/.test(chaine(l.texte))).length;
+    }
+  } catch (_) { ouvertes = 0; }
+  if (!ouvertes) return ''; // aucune ligne ouverte dans cette conversation : rien à fermer
+  return `Fichier contexte : le commit ${court} ne porte aucune mention [ctx]. ${ouvertes} ligne(s) de cette conversation sont ouvertes : si ce commit en TERMINE une, cite [ctx C-NNNN] dans l'historique maintenant ; s'il n'en fait qu'une partie, cite [ctx C-NNNN partiel] et écris ce qui reste dans sa note (commande etat). Un commit sans mention ne ferme rien.`;
+}
+
+// Lignes citées « partiel » encore et encore : dit au modèle d'écrire ce qui reste, ou de fermer et de rouvrir.
+function texteInsistants(resultat) {
+  const liste = resultat && Array.isArray(resultat.insistants) ? resultat.insistants : [];
+  if (!liste.length) return '';
+  return `Preuves partielles répétées : ${liste.join(', ')}. Une ligne citée « partiel » sans fin ne se ferme jamais : écris ce qui reste dans sa note (etat C-NNNN en-cours "reste : ..."), ou, si la partie faisable est finie, ferme-la par une mention complète et ouvre une ligne neuve pour le reste.`;
+}
+
 // Seul chemin vers « fait ». Un marqueur non partiel l'emporte sur un partiel du même ID.
+// insistants : lignes dont le compteur de preuves partielles vient d'atteindre un multiple de PARTIELS_RAPPEL
+// (« C-0012 (5 fois) »). Une ligne citée « partiel » des dizaines de fois sans que sa note dise ce qui reste ne
+// se ferme jamais : le rappel arrive toutes les cinq citations.
+const PARTIELS_RAPPEL = 5;
 function appliquerPreuves({ agent, marqueurs, preuve }) {
   validerAgent(agent);
-  const res = { faits: [], partiels: [], ignores: [], projets: [] };
+  const res = { faits: [], partiels: [], ignores: [], projets: [], insistants: [] };
   const parId = new Map();
   for (const m of marqueurs || []) {
     const id = chaine(m.id).toUpperCase();
@@ -2230,6 +2524,8 @@ function appliquerPreuves({ agent, marqueurs, preuve }) {
           l.statut = 'en-cours';
           l.note = l.note && !/^partiel \(preuve/.test(l.note) ? `${note} ; ${l.note}` : note;
           l.maj = iso;
+          l.partiels = (Number.isInteger(l.partiels) ? l.partiels : 0) + 1;
+          if (l.partiels % PARTIELS_RAPPEL === 0) res.insistants.push(`${id} (${l.partiels} fois)`); // ancre-mutation:partiels-insistants
           o.journal({ evt: 'partiel', id, avant, preuve });
           res.partiels.push(id);
         }
@@ -2300,10 +2596,10 @@ function reconcilierChronometre({ agent, base }) {
     // Une interruption conserve donc les preuves a rejouer.
     return s.attente.slice();
   });
-  const total = { faits: [], partiels: [], ignores: [], projets: [] };
+  const total = { faits: [], partiels: [], ignores: [], projets: [], insistants: [] };
   for (const { cle, fichier, marqueurs } of parFichier) {
     const r = appliquerPreuves({ agent, marqueurs, preuve: `fichier ${fichier}` });
-    for (const k of Object.keys(total)) total[k].push(...r[k].filter(x => !total[k].includes(x)));
+    for (const k of Object.keys(total)) total[k].push(...(r[k] || []).filter(x => !total[k].includes(x)));
     avecVerrou(fEtat, () => {
       const s = JSON.parse(sansBom(lireTexte(fEtat)));
       s.attente = (s.attente || []).filter(p => p.cle !== cle);
@@ -3002,7 +3298,7 @@ function contexteApresPreuve({ agent, projet, script, resultat, preuve, sessionI
   const etat = etatDeSession(lireLedger(projet, agent), agent, sessionId);
   const faits = resultat.faits.length ? `Retiré sur preuve (${preuve}) : ${resultat.faits.join(', ')}.` : '';
   const partiels = resultat.partiels.length ? `Passé en-cours (partiel, ${preuve}) : ${resultat.partiels.join(', ')}.` : '';
-  const entete = [`Fichier contexte (projet ${projet}, agent ${agent}) mis à jour.`, POUR_ORCHESTRATEUR, faits, partiels, 'Reste :'].filter(Boolean).join('\n');
+  const entete = [`Fichier contexte (projet ${projet}, agent ${agent}) mis à jour.`, POUR_ORCHESTRATEUR, faits, partiels, texteInsistants(resultat), 'Reste :'].filter(Boolean).join('\n');
   return composerContexte(entete, lignesCompactes(etat), '', cmd.lister, PLAFOND - MARGE_ADAPTATEUR);
 }
 
@@ -3131,6 +3427,32 @@ function chercher({ projet, agent, motifs }) {
   return out.join('\n');
 }
 
+// Avertissements rendus par « ajouter », jamais un refus : la ligne est créée. Un message entier recopié en UNE
+// seule ligne, ou une ligne de plus de 400 caractères, porte presque toujours plusieurs travaux : elle n'est
+// alors jamais « entièrement faite » et reste citée « partiel » sans fin. Des consignes (« ne lance aucun
+// sous-agent ») et des réponses de questionnaire devenues des lignes ne peuvent pas non plus finir.
+const LONGUEUR_PLUSIEURS_TRAVAUX = 400;
+function avertissementsAjout({ projet, agent, texte, de }) {
+  const out = [];
+  const t = chaine(texte).trim();
+  const deId = de ? chaine(de).trim().toUpperCase() : null;
+  let message = '';
+  if (deId) { try { const d = lireLedger(projet, agent).demandes[deId]; message = d ? chaine(d.texte).trim() : ''; } catch (_) { message = ''; } }
+  const aplati = x => chaine(x).replace(/\s+/g, ' ').trim();
+  const entier = !!message && aplati(t) === aplati(message);
+  const phrases = aplati(t).split(/[.!?;]\s+/).filter(p => p.trim().length > 12).length;
+  if (t.length > LONGUEUR_PLUSIEURS_TRAVAUX && (entier || phrases >= 4)) { // ancre-mutation:ajout-plusieurs-travaux
+    out.push(`Attention : cette ligne fait ${t.length} caractères${entier ? ' et reprend le message entier' : ''}. Si elle demande plusieurs travaux, crée une ligne PAR travail (même --de ${deId || 'M-NNNN'}) : une ligne qui en porte plusieurs ne peut jamais être dite entièrement faite, elle reste ouverte.`);
+  }
+  if (/^Réponses de l'utilisateur à un questionnaire/.test(message)) { // ancre-mutation:ajout-questionnaire
+    out.push('Attention : ce message est une réponse de l\'utilisateur à un questionnaire. C\'est une DÉCISION : note-la dans la mémoire du projet pour ne pas la redemander. N\'en fais une ligne que pour le travail qu\'elle demande, et dis ce travail dans le texte de la ligne.');
+  }
+  if (/^(?:ne |n'|n’|jamais |aucun |aucune |pas de |sans )/i.test(t) && t.length < 240) { // ancre-mutation:ajout-consigne
+    out.push('Attention : cette ligne ressemble à une consigne (une contrainte à respecter), pas à un travail à finir. Une consigne ne peut pas être « faite » : si c\'en est une, respecte-la et classe-la, au lieu de la laisser ouverte.');
+  }
+  return out;
+}
+
 function analyserArgs(argv) {
   const opts = {};
   const pos = [];
@@ -3173,8 +3495,11 @@ function executerCli(argv, { agent, script }) {
       }
       case 'ajouter': {
         if (!opts.projet) throw new Error('--projet requis');
-        const id = ajouterLigne({ projet: opts.projet, agent, texte: texteLibre(0), de: opts.de || null, sessionId: opts.session });
-        return ok(`${id} ajouté (projet ${opts.projet}${opts.de ? `, de ${opts.de.toUpperCase()}` : ''}). Quand c'est fait : cite [ctx ${id}] dans l'historique ou le commit ; [ctx ${id} partiel] si ce n'est pas fini.`);
+        const texteLigne = texteLibre(0);
+        const id = ajouterLigne({ projet: opts.projet, agent, texte: texteLigne, de: opts.de || null, sessionId: opts.session });
+        let avertissements = [];
+        try { avertissements = avertissementsAjout({ projet: opts.projet, agent, texte: texteLigne, de: opts.de || null }); } catch (_) { avertissements = []; } // ancre-mutation:ajout-avertissements
+        return ok([`${id} ajouté (projet ${opts.projet}${opts.de ? `, de ${opts.de.toUpperCase()}` : ''}). Quand c'est fait : cite [ctx ${id}] dans l'historique ou le commit ; [ctx ${id} partiel] si ce n'est pas fini.`, ...avertissements].join('\n'));
       }
       case 'sans-travail': {
         const id = normaliserId(pos[0], 'M');
@@ -3315,7 +3640,8 @@ module.exports = {
   texteConsigneSousAgent, consigneADonner, consigneDansTranscript, texteRepriseSousAgent, texteLectureSeule, compactageDuSousAgent, noterCompactage,
   transcriptDUnSousAgent, idDepuisTranscript,
   extraireMarqueurs, marqueursAjoutes, estFichierPreuve, preuveCommit, preuvesDepuisOutil,
-  appliquerPreuves, reconcilier, reconcilierDansHook,
+  appliquerPreuves, reconcilier, reconcilierDansHook, texteCommitNu, texteInsistants, texteDeMachine, nettoyerTemporaires,
+  commitsDeLOutil, commitsDepuisSortie, shasDansSortie, noterCommitsSousAgent, texteCommitsAgents, avertissementsAjout,
   gardeOutil, texteToucheRacine, commandeViseRacine, appelleCli, commandeLectureOuCli, lectureAmbigue,
   commandes, contexteMessage, contexteSession, contexteApresPreuve, composerContexte,
   executerCli,
