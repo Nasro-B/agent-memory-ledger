@@ -359,6 +359,71 @@ test('ajouter : un message entier et long, une réponse de questionnaire ou une 
   });
 });
 
+// ------------------------------------------------------------------ rapport d'un sous-agent, sous-agents finis jamais oubliés
+
+test('message d\'agent : le rapport de fin d\'un sous-agent est reconnu, un message de l\'utilisateur ne l\'est pas', () => {
+  assert.equal(core.expediteurMessageAgent('<agent-message from="abc123">\n[Subagent hand-back] The text below is the final report'), 'abc123');
+  assert.equal(core.expediteurMessageAgent('  \n<agent-message from="abc123">'), 'abc123');
+  assert.equal(core.expediteurMessageAgent('regarde ce texte : <agent-message from="abc123">'), null, 'seulement en tête du message');
+  assert.equal(core.expediteurMessageAgent('<agent-message>'), null);
+  assert.equal(core.expediteurMessageAgent('<agent-messages from="abc123">'), null);
+  assert.equal(core.expediteurMessageAgent('corrige tout'), null);
+  assert.equal(core.expediteurMessageAgent(''), null);
+  assert.equal(core.expediteurMessageAgent(undefined), null);
+});
+
+test('hook : sous-agent fini : son rapport ne reçoit pas de numéro M, et son résultat est redit à chaque nouveau message, au démarrage et après un compactage', () => {
+  const dir = dossier('rappel-force');
+  const session = 'sess-force';
+  const base = { session_id: session, cwd: CWD_PROJET };
+  const ledger = () => avecRacine(dir, () => core.lireLedger(PROJET, AGENT));
+  hook(dir, { ...base, hook_event_name: 'SessionStart', source: 'startup' });
+  const ligne = avecRacine(dir, () => core.suivreTache({ agent: AGENT, sessionId: session, cwd: CWD_PROJET, tache: { id: 'ag-force-1', genre: 'general-purpose', titre: 'lot du panier', resultat: 'rapports/resultat-du-lot.jsonl' } }));
+  assert.match(ligne, /^C-\d{4}$/);
+  const outil = { ...base, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: {} };
+  const message = (id, texte) => hook(dir, { ...base, hook_event_name: 'UserPromptSubmit', prompt_id: id, prompt: texte });
+  const rappel = new RegExp(`Rappel : 1 sous-agent\\(s\\) TERMINÉ\\(S\\) dont le résultat n'est toujours pas traité : ${ligne} « lot du panier »`);
+  assert.doesNotMatch(message('p-0', 'première demande').texte, /TERMINÉ\(S\)/, 'un sous-agent encore en cours n\'est pas rappelé comme fini');
+  assert.ok(avecRacine(dir, () => core.finirTache({ agent: AGENT, sessionId: session, id: 'ag-force-1', statut: 'terminé', reprise: true })));
+  assert.match(hook(dir, outil).texte, /Sous-agent\(s\) terminé\(s\), résultat à traiter/, 'la fin est annoncée au premier outil');
+  assert.equal(hook(dir, outil).texte, '', 'un simple outil ne rappelle pas avant le délai : pas de boucle');
+  // Le rapport de fin arrive comme un tour de l'utilisateur : aucun numéro M, et ce qui attend est redit.
+  const avant = Object.keys(ledger().demandes).length;
+  const rapport = message('p-rapport', '<agent-message from="ag-force-1">\n[Subagent hand-back] The text below is the final report of a subagent.\n  fait : le lot du panier');
+  assert.equal(Object.keys(ledger().demandes).length, avant, 'le rapport d\'un sous-agent ne doit jamais devenir un message de l\'utilisateur');
+  assert.doesNotMatch(rapport.texte, /Nouveau message M-/);
+  assert.match(rapport.texte, rappel);
+  // Le message d'un agent inconnu (autre session) : pas un message de l'utilisateur non plus.
+  message('p-autre', '<agent-message from="session-inconnue">\nbonjour');
+  assert.equal(Object.keys(ledger().demandes).length, avant);
+  // La notification de fin d'une autre tâche de fond (une commande, un agent inconnu) : pas un message de l'utilisateur,
+  // et pas de rappel non plus (chaque commande de fond qui finit ne doit pas redire toute la liste).
+  const notification = message('p-notif', '<task-notification>\n<task-id>autre-tache</task-id>\n<status>completed</status>\n</task-notification>');
+  assert.equal(Object.keys(ledger().demandes).length, avant);
+  assert.doesNotMatch(notification.texte, /TERMINÉ\(S\)/);
+  // Demandes multiples : chaque nouveau message de l'utilisateur redit le sous-agent fini, avec le chemin de son résultat.
+  for (const [id, texte] of [['p-2', 'autre demande : corrige le formulaire'], ['p-3', 'et aussi le pied de page']]) {
+    const r = message(id, texte);
+    assert.match(r.texte, /Nouveau message M-\d+/);
+    assert.match(r.texte, rappel, `redit au message ${id}`);
+    assert.match(r.texte, /TERMINÉ\(S\)[^\n]*« lot du panier » \(résultat : rapports\/resultat-du-lot\.jsonl\)/, 'le rappel lui-même donne le chemin du résultat');
+  }
+  assert.equal(Object.keys(ledger().demandes).length, avant + 2);
+  // Après un compactage : par le filet du premier outil (PostCompact a posé le drapeau), puis par SessionStart.
+  // Le témoin du démarrage de ce test est vieilli : le filet ne sert que si SessionStart n'a pas déjà redonné la
+  // liste pour CE compactage (moins de deux minutes d'écart).
+  const ancien = Date.now() / 1000 - 600;
+  fs.utimesSync(path.join(dir, '.sessions', `reinject-${AGENT}-${session}.vu`), ancien, ancien);
+  hook(dir, { ...base, hook_event_name: 'PostCompact', trigger: 'auto' });
+  const filet = hook(dir, outil);
+  assert.match(filet.texte, /Réinjection après compactage/);
+  assert.match(filet.texte, rappel, 'redit avec la liste redonnée après un compactage');
+  assert.match(hook(dir, { ...base, hook_event_name: 'SessionStart', source: 'compact' }).texte, rappel, 'redit à la reprise après compactage');
+  // Résultat prouvé traité : plus rien à rappeler.
+  assert.deepEqual(avecRacine(dir, () => core.appliquerPreuves({ agent: AGENT, marqueurs: [{ id: ligne, partiel: false }], preuve: 'fichier h.md' })).faits, [ligne]);
+  assert.doesNotMatch(message('p-4', 'dernier message').texte, /TERMINÉ\(S\)/, 'une ligne fermée sur preuve n\'est plus rappelée');
+});
+
 // ---------------------------------------------------------------------------
 // Mutations : chaque comportement ci-dessus, défait dans une copie des scripts, doit rendre au moins un banc
 // ROUGE, et la même copie NON mutée doit rester verte (preuve que le rouge vient de la mutation).
@@ -397,7 +462,7 @@ function relancer(hookCopie, motif) {
 }
 
 test('mutation : mentions, commits lus (dossiers, sortie), commit sans mention, partiels, textes de machine, sous-agents, conseils de « ajouter », temporaires -> banc rouge', { skip: EN_MUTATION }, () => {
-  const motif = '^(texte de machine|hook : un texte de machine|mention complète|commit|hook : après un commit|preuves partielles|fichiers temporaires|hook : le commit d un sous-agent|ajouter : un message entier)';
+  const motif = '^(texte de machine|hook : un texte de machine|mention complète|commit|hook : après un commit|preuves partielles|fichiers temporaires|hook : le commit d un sous-agent|ajouter : un message entier|message d.agent|hook : sous-agent fini)';
   const temoin = relancer(copie('temoin-fermeture'), motif);
   assert.equal(temoin.status, 0, 'copie non mutée doit être verte :\n' + temoin.stdout);
   const NOYAU = 'lib/context-ledger-core.js';
@@ -421,6 +486,15 @@ test('mutation : mentions, commits lus (dossiers, sortie), commit sans mention, 
     ['ajout-plusieurs-travaux', '  if (false) { // MUTATION : une ligne longue n\'est jamais signalée', /not ok \d+ - ajouter : un message entier/, NOYAU, '^ajouter : un message entier'],
     ['ajout-questionnaire', '  if (false) { // MUTATION : une réponse de questionnaire n\'est jamais signalée', /not ok \d+ - ajouter : un message entier/, NOYAU, '^ajouter : un message entier'],
     ['ajout-consigne', '  if (false) { // MUTATION : une consigne n\'est jamais signalée', /not ok \d+ - ajouter : un message entier/, NOYAU, '^ajouter : un message entier'],
+    // Rapport d'un sous-agent et sous-agents finis jamais oubliés.
+    ['message-d-agent', '  const m = null; // MUTATION : le rapport d\'un sous-agent n\'est plus reconnu', /not ok \d+ - message d.agent/, NOYAU, '^message d.agent'],
+    ['agent-message-non-enregistre', '  if (false) { // MUTATION : le rapport d\'un sous-agent est enregistré comme un message', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
+    ['livraison-rappel-force', '  const complet = rappeler; // MUTATION : le rappel complet attend toujours son délai', /not ok \d+ - hook : sous-agent fini/, NOYAU, '^hook : sous-agent fini'],
+    ['rappel-force-message', '  const enFile = [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join(\'\\n\'); // MUTATION : un nouveau message ne redit pas le sous-agent fini', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
+    ['rappel-force-rapport', '    sortir(\'UserPromptSubmit\', [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join(\'\\n\')); // MUTATION : le rapport ne redit pas ce qui attend', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
+    ['rappel-force-filet', '  const courts = [suivi, commitNu, suiviEnCours(input)].filter(Boolean).join(\'\\n\'); // MUTATION : la liste redonnée après un compactage ne redit pas le sous-agent fini', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
+    ['rappel-force-demarrage', '    [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join(\'\\n\'), // MUTATION : le démarrage ne redit pas le sous-agent fini', /not ok \d+ - hook : sous-agent fini/, ADAPTATEUR, '^hook : sous-agent fini'],
+    ['chemin-du-resultat', '  const liste = etat.attente.slice(0, MAX_LIVRAISONS).map(t => `${t.ligne} « ${t.titre} »`).join(\' ; \'); // MUTATION : le rappel ne donne pas le chemin du résultat', /not ok \d+ - hook : sous-agent fini/, NOYAU, '^hook : sous-agent fini'],
   ];
   for (const [ancre, remplacement, rouge, fichier, seul] of mutations) {
     const r = relancer(copie('mutation-' + ancre, fichier, 'ancre-mutation:' + ancre, remplacement), seul);

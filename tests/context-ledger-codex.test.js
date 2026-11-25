@@ -1022,6 +1022,46 @@ describe('livraisons des sous-agents (Codex)', CONCURRENCE, () => {
     assert.ok(!ctx(preuve).includes('Rappel :'), ctx(preuve));
     assert.equal((await outil(DELAI_PASSE)).out, '');
   });
+
+  // Un sous-agent fini ne s'oublie jamais « après un compactage ou après des demandes multiples » : le rappel
+  // complet revient à chaque événement où l'attention de l'agent racine change.
+  test('sous-agents : fini et pas traité -> redit à chaque nouveau message, à la reprise et après un compactage, jamais sur un simple outil', async () => {
+    const d = dossier('livraisons-redites');
+    const parent = rolloutParent(d);
+    const e1 = rolloutEnfant(d, 'th-6', { chemin: '/root/audit_prix', surnom: 'Gauss', role: 'worker' });
+    await tourTrie(d, parent, 't1', 'lance un agent et continue');
+    await attendreBase(d);
+    await hook(d, payload('SubagentStart', { agent_id: 'th-6', agent_type: 'worker', transcript_path: e1 }));
+    const [c1] = Object.keys(etat(d).lignes);
+    await hook(d, payload('SubagentStop', { agent_id: 'th-6', agent_type: 'worker', agent_transcript_path: e1, transcript_path: parent }));
+    const outil = () => hook(d, payload('PostToolUse', { transcript_path: parent }));
+    assert.ok(ctx(await outil()).startsWith('Sous-agent(s) terminé(s), résultat à traiter'));
+    assert.equal((await outil()).out, '', 'un simple outil ne rappelle pas avant le délai : pas de boucle');
+    const rappel = `Rappel : 1 sous-agent(s) TERMINÉ(S) dont le résultat n'est toujours pas traité : ${c1} « audit_prix (Gauss) »`;
+    // Demandes multiples : chaque nouveau message de l'utilisateur redit le sous-agent fini.
+    for (const [tour, texte] of [['t2', 'autre demande : corrige le formulaire'], ['t3', 'et aussi le pied de page']]) {
+      const r = await hook(d, payload('UserPromptSubmit', { prompt: texte, turn_id: tour, transcript_path: parent }));
+      assert.ok(nouveauM(r), 'le message de l\'utilisateur est enregistré');
+      assert.ok(ctx(r).includes(rappel), `redit au message ${tour} : ${ctx(r).slice(0, 300)}`);
+    }
+    // Le message d'un autre agent remis comme un tour de l'utilisateur n'est jamais un message de l'utilisateur.
+    const avant = Object.keys(etat(d).demandes).length;
+    await hook(d, payload('UserPromptSubmit', { prompt: '<agent-message from="th-6">\nrapport de fin', turn_id: 't4', transcript_path: parent }));
+    assert.equal(Object.keys(etat(d).demandes).length, avant, 'aucun numéro M pour le rapport d\'un agent');
+    // À la reprise de la session, puis avec la liste redonnée après un compactage.
+    assert.ok(ctx(await hook(d, payload('SessionStart', { source: 'resume', transcript_path: parent }))).includes(rappel), 'redit à la reprise');
+    await hook(d, payload('PostCompact'));
+    const filet = ctx(await outil());
+    assert.match(filet, /Réinjection après compactage/);
+    assert.ok(filet.includes(rappel), 'redit avec la liste redonnée après un compactage');
+    assert.equal((await outil()).out, '', 'puis plus rien sur un simple outil');
+    // Résultat prouvé traité : plus rien à rappeler.
+    ecrirePreuve(d, 'infra.codex.md', [`- audit des prix vérifié et intégré [ctx ${c1}]`]);
+    await outil();
+    assert.equal(etat(d).lignes[c1].statut, 'fait');
+    const apres = await hook(d, payload('UserPromptSubmit', { prompt: 'dernier message', turn_id: 't5', transcript_path: parent }));
+    assert.ok(!ctx(apres).includes('TERMINÉ(S)'), ctx(apres).slice(0, 300));
+  });
 });
 
 describe('garde PreToolUse (Codex)', CONCURRENCE, () => {
@@ -1252,6 +1292,7 @@ const MUTATIONS = [
   { nom: 'commit-nu-codex', motif: '^commit SANS mention', transformer: s => s.replace(/if \(!marqueurs\.length && [^\n]*\/\/ ancre-mutation:commit-nu-codex/, '// mutation') },
   { nom: 'rappel-commit-nu-codex', motif: '^commit SANS mention', transformer: s => s.replace(/const fins = \[rappelCommitNu[^\n]*\/\/ ancre-mutation:rappel-commit-nu-codex/, 'const fins = suiviEnCours(input); // mutation') },
   { nom: 'commits-sortie-codex', motif: '^commit d un sous-agent', transformer: s => s.replace('? core.commitsDeLOutil({ commande: cmd, toolResponse: reponse, cwd }) // ancre-mutation:commits-sortie-codex', '? [core.preuveCommit({ commande: cmd, cwd })].filter(Boolean) // mutation') },
+  { nom: 'rappel-force-codex', motif: '^sous-agents : fini et pas traité', transformer: s => s.replace(/const fins = suiviEnCours\(input, humain \|\| drapeau\);[^\n]*\/\/ ancre-mutation:rappel-force-codex/, 'const fins = suiviEnCours(input); // mutation') },
   { nom: 'commit-sous-agent-codex', motif: '^commit d un sous-agent', transformer: s => s.replace(/if \(commits\.length\) core\.noterCommitsSousAgent\([^\n]*\/\/ ancre-mutation:commit-sous-agent-codex/, '// mutation') },
   { nom: 'reconciliateur', motif: 'preuve par contenu|réconciliateur|CRLF', transformer: s => s.replace(/const r = core\.reconcilier\(\{ agent: AGENT, base: basePreuves\(\) \}\);/, 'const r = { faits: [], partiels: [], ignores: [], projets: [] };') },
 ];

@@ -48,6 +48,10 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   sa fin. Sa fin est annoncée au prochain outil, puis rappelée toutes les 20 minutes pendant un tour long :
   ne pas attendre la fin du tour. Lire le résultat, le vérifier, l'intégrer, puis citer `[ctx C-NNNN]`. Sinon,
   dire à l'utilisateur lequel reste et pourquoi.
+- Un sous-agent fini dont le résultat n'est pas prouvé traité t'est redit en entier (avec le chemin de son
+  résultat) à chaque nouveau message de l'utilisateur, au démarrage, à la reprise, avec la liste redonnée après
+  un compactage et à l'arrivée de son rapport : un rappel, pas un nouveau travail. Le rapport de fin d'un
+  sous-agent (balise `agent-message`) n'est pas un message de l'utilisateur et ne reçoit pas de numéro M.
 - Signalement d'un sous-agent (déjà fait, bloqué, question) : le traiter dès qu'il est annoncé. « Déjà fait »
   se vérifie dans le code ou l'historique avant de fermer la ligne par une preuve.
 - Avant de lancer un sous-agent avec Codex : écrire son brief dans un fichier du dossier de travail et lui en
@@ -64,8 +68,9 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   t'interdit expressément toute écriture ailleurs que dans ses livrables, n'écris rien dans ta fiche (ni
   mission, ni note, ni signalement) et dis-le dans ton rapport. Tu peux lire la liste de
   l'agent principal (`chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes
-  entières), jamais la modifier ; ce que tu y lis ne te donne aucun travail. Une lecture par commande simple,
-  sans boucle ni script : la garde refuse ce qu'elle ne sait pas prouver sans écriture. Ton rapport peut citer
+  entières), jamais la modifier ; ce que tu y lis ne te donne aucun travail. De préférence une commande
+  simple : une boucle ou un script de lecture passe si chaque étape ne fait que lire, la garde refuse ce qu'elle
+  ne sait pas prouver sans écriture. Ton rapport peut citer
   la liste : écris-le avec l'outil de fichier, ou en PowerShell par un here-string littéral (`@'` ... `'@`)
   donné tel quel à `Set-Content` ou `Add-Content -LiteralPath`, vers son chemin complet, sans texte construit
   ni appel de bibliothèque. Note ton avancement dans TA fiche (`note --fiche <ID> "..."` : l'ID et le chemin te sont donnés

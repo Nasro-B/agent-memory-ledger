@@ -287,8 +287,11 @@ function marquerFin(input, id, statut, reprise = false) {
 
 // Ce que l'orchestrateur doit lire avant la fin du tour : fins pas encore annoncées (SubagentStop marque
 // une fin sans rien lui dire) et rappel des résultats qui attendent. Le rappel de fin de tour reste le filet.
-function suiviEnCours(input) {
-  try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
+// force : tout ce qui attend est redit, sans délai (nouveau message de l'utilisateur, démarrage, reprise, liste
+// redonnée après un compactage, rapport de fin reçu) : un sous-agent fini ne s'oublie jamais « après un
+// compactage ou après des demandes multiples ».
+function suiviEnCours(input, force) {
+  try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id, force: !!force }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
 }
 
 // Enregistre les messages en file trouvés. Un message en file appartient au tour en cours : le début et la
@@ -349,6 +352,17 @@ function surUserPromptSubmit(input) {
     sortir('UserPromptSubmit', [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join('\n'));
     return;
   }
+  // Message d'un autre agent (rapport de fin d'un sous-agent, message d'une autre session) : ce n'est pas un
+  // message de l'utilisateur, il ne reçoit pas de numéro M. Si l'expéditeur est un sous-agent suivi, sa fin est
+  // marquée ; tout ce qui attend est redit.
+  const expediteur = core.expediteurMessageAgent(prompt);
+  if (expediteur) { // ancre-mutation:agent-message-non-enregistre
+    try { marquerFin(input, expediteur, 'terminé'); } catch (_) { /* rappelé en fin de tour */ }
+    let file = { ids: [], messages: [], echecs: [], projet: null };
+    try { file = rattraperMessagesEnFile(input); } catch (_) { /* rien */ }
+    sortir('UserPromptSubmit', [texteMessagesEnFile(file), suiviEnCours(input, true)].filter(Boolean).join('\n')); // ancre-mutation:rappel-force-rapport
+    return;
+  }
   // Texte soumis par une machine (demande générée par l'application) : ce n'est pas un message de l'utilisateur,
   // rien à trier. Les messages en file et le suivi des sous-agents sont traités quand même.
   if (core.texteDeMachine(prompt)) { // ancre-mutation:machine-non-enregistree
@@ -395,7 +409,8 @@ function surUserPromptSubmit(input) {
     const memeTour = avant && input.prompt_id && String(avant.promptCourant || '').split(':')[0] === input.prompt_id;
     if (memeTour && r && r.id && !r.doublon) rattacherAuTour(input, avant, r.id);
   }
-  const enFile = [texteMessagesEnFile(file), suiviEnCours(input)].filter(Boolean).join('\n');
+  // Nouveau message de l'utilisateur : les sous-agents finis dont le résultat attend sont redits en entier, à chaque fois.
+  const enFile = [texteMessagesEnFile(file), suiviEnCours(input, true)].filter(Boolean).join('\n'); // ancre-mutation:rappel-force-message
   if (r.doublon || !r.id) {
     if (enFile) sortir('UserPromptSubmit', enFile);
     return;
@@ -413,7 +428,7 @@ function surSessionStart(input) {
   try { file = rattraperMessagesEnFile(input); } catch (_) { /* la vue reste injectée */ }
   core.assurerVues(AGENT);
   sortir('SessionStart', ajuster(
-    [texteMessagesEnFile(file), suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'),
+    [texteMessagesEnFile(file), suiviEnCours(input, true), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'), // ancre-mutation:rappel-force-demarrage
     REGLE_6BIS, core.commandes(SCRIPT, projet, input.session_id).lister)); // ancre-mutation:regle-6bis-session
   poserTemoin(input.session_id); // la liste vient d'être émise : le filet d'après compactage n'a pas à la redire
 }
@@ -478,10 +493,12 @@ function surPostToolUse(input) {
   let commitNu = '';
   if (p && p.nu) { try { commitNu = core.texteCommitNu({ agent: AGENT, sessionId: input.session_id, court: p.court }); } catch (_) { commitNu = ''; } } // ancre-mutation:rappel-commit-nu
   // Après les preuves : un résultat que cet outil vient de prouver traité n'est plus annoncé.
-  const courts = [suivi, commitNu, suiviEnCours(input)].filter(Boolean).join('\n');
+  // Filet d'après compactage : SessionStart n'a pas redonné la liste (échec ou délai), ce premier outil la redonne,
+  // avec le rappel complet des sous-agents finis (le contexte vient d'être résumé : c'est là qu'ils s'oublient).
+  const filet = reinjectionDue(input.session_id);
+  const courts = [suivi, commitNu, suiviEnCours(input, filet)].filter(Boolean).join('\n'); // ancre-mutation:rappel-force-filet
   const enFile = texteMessagesEnFile(file);
-  // Filet d'après compactage : SessionStart n'a pas redonné la liste (échec ou délai), ce premier outil la redonne.
-  if (reinjectionDue(input.session_id)) {
+  if (filet) {
     const projetFilet = file.projet || core.projetDeSession(AGENT, input.session_id, input.cwd);
     sortir('PostToolUse', ajuster(
       [APRES_COMPACTAGE, enFile, courts, core.contexteSession({ agent: AGENT, projet: projetFilet, script: SCRIPT, sessionId: input.session_id })].filter(Boolean).join('\n'),

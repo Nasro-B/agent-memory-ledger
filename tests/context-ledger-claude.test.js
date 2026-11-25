@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync, spawn, execFileSync } = require('node:child_process');
 const { test, before } = require('node:test');
 
@@ -37,6 +38,9 @@ const MEMOIRE_PROJET = path.join(os.homedir(), '.claude', 'projects', 'c--travai
 // Les réglages de la personne qui lance les bancs ne doivent jamais fuir dans les tests (ni l'inverse) :
 // chaque test pose sa propre maison, et la copie de secours n'existe que dans les tests qui la demandent.
 for (const k of ['CONTEXT_LEDGER_DIR', 'CONTEXT_LEDGER_SECOURS_DIR', 'AGENT_MEMORY_LEDGER_HOME']) delete process.env[k];
+// La copie de secours est asynchrone par défaut (un travailleur détaché la fait) : les bancs qui inspectent la copie
+// juste après un hook la veulent synchrone ; les trois bancs « copie de secours asynchrone » reposent la valeur 0.
+process.env.CONTEXT_LEDGER_SECOURS_SYNCHRONE = '1';
 
 const core = require(CORE_PATH);
 
@@ -591,24 +595,152 @@ test('garde : sous-agent : sous-expressions de lecture, blocs sans effet, Where-
     `Sort-Object -InputObject (Get-ChildItem '${R}') -Property $sb`,
     `Get-Content '${R}\\x.md' | ForEach-Object { '{0}' -f (Remove-Item x) }`,
     `Get-Content '${R}\\x.md' | % { $_.Delete() }`,
-    `foreach($i in 1,2){ Get-Content '${R}\\x.md' }`,
-    `$x = Get-Content '${R}\\x.md'`,
     `'${R}\\x.md'`,
     `"cat x" '${R}\\x.md'`,
     `& 'C:\\Program Files\\x\\rm.exe' '${R}\\x.md'`,
     `(Get-Content '${R}\\x.md') > y.txt`,
     `cat '${R}\\x.md' ${String.fromCharCode(1)}`,
   ]) assert.ok(garde(cmd), `devait refuser : ${cmd}`);
-  // Bout en bout : l'aide se lit, et le refus dit comment lire sans boucle.
+  // Bout en bout : l'aide se lit, une boucle qui ne fait que lire passe, et le refus dit ce qui passe.
   assert.equal(preTool(dir, 'Bash', { command: `${S} help` }, { agent_id: 'a42' }).out, '');
-  const r = preTool(dir, 'Bash', { command: `foreach($i in 1,2){ Get-Content '${R}\\x.md' }` }, { agent_id: 'a42' });
+  assert.equal(preTool(dir, 'Bash', { command: `foreach($i in 1,2){ Get-Content '${R}\\x.md' }` }, { agent_id: 'a42' }).out, '', 'une boucle qui ne fait que lire passe');
+  const r = preTool(dir, 'Bash', { command: `foreach($i in 1,2){ Remove-Item '${R}\\x.md' }` }, { agent_id: 'a42' });
   assert.ok(estRefuse(r), r.out);
-  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /une par lecture, sans boucle ni script/);
+  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /les boucles et scripts passent seulement si chaque étape ne fait que lire/);
   assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /chercher C-0151 C-0152 rend ces lignes entières ; --agent claude ou --agent codex pour la liste d'un autre agent/);
   const h = cli(dir, ['help']);
   assert.equal(h.code, 0, h.err);
   assert.match(h.out, /^Usage : node context-ledger\.js <commande>/);
   assert.match(h.out, /un identifiant \(chercher C-0151 C-0152 M-0042\) rend la ligne ou le message entier/);
+});
+
+test('garde : sous-agent : les 17 refus mesures en lecture passent apres analyse des scripts', () => {
+  const dir = dossier('garde-sous-agent-scripts-1');
+    const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+    const CLI = `node 'C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js'`;
+    const garde = command => avecRacine(dir, () => core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'PowerShell', tool_input: { command }, cwd: CWD_PROJET } }));
+    const mesures = [
+      { ref: 'cas 1', exacte: true, command: `$d='${R}\\projet-demo.claude'; $names=@('C-0101.txt','C-0102.txt','C-0103.txt','C-0104.txt','C-0105.txt','C-0106.txt'); foreach($n in $names){ $p=Join-Path $d $n; if(Test-Path -LiteralPath $p){ "--- $n"; & wc.exe -l -- $p; Get-Content -LiteralPath $p } }` },
+      { ref: 'cas 2', exacte: true, command: `$p='${R}\\projet-demo.claude\\C-0107.txt'; Write-Output ('BYTES='+(Get-Item -LiteralPath $p).Length); & wc.exe -l -- $p; Get-Content -LiteralPath $p | ForEach-Object { $_ } | Out-String -Width 220` },
+      { ref: 'cas 3', exacte: true, command: `${CLI} chercher --projet projet-demo --agent claude C-0108 C-0109 C-0110 C-0111; foreach($id in @('C-0108','C-0109','C-0110','C-0111')) { $p="${R}\\projet-demo.claude\\$id.txt"; if(Test-Path -LiteralPath $p) { "--- $id sidecar ---"; Get-Content -LiteralPath $p -Raw } else { "--- $id sidecar ABSENT ---" } }` },
+      { ref: 'cas 4', exacte: true, command: `${CLI} chercher --projet projet-demo --agent claude C-0112 C-0113; Select-String -LiteralPath 'D:\\travail\\relecture\\relecture-passe-5.md' -Pattern 'R4-174' | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line)" }` },
+      { ref: 'cas 5', exacte: true, command: `$root='${R}\\projet-demo.claude'; $names=@('C-0114.txt','C-0101.txt','C-0115.txt','C-0116.txt','C-0117.txt','C-0118.txt','C-0119.txt','C-0120.txt','C-0121.txt','C-0122.txt','C-0123.txt','C-0124.txt','C-0125.txt'); foreach($n in $names){ Write-Output ('--- '+$n); Get-Content -LiteralPath (Join-Path $root $n) -Raw }` },
+      { ref: 'cas 6', exacte: true, command: `$base='${R}\\projet-demo.claude'; foreach($id in @('C-0126','C-0127','C-0128','C-0129','C-0130','C-0131','C-0132','C-0133','C-0134','C-0135','C-0136')){ $p=Join-Path $base ($id+'.txt'); if(Test-Path -LiteralPath $p){ Write-Output "--- $id ---"; Get-Content -LiteralPath $p } }` },
+      { ref: 'cas 7', exacte: true, command: `$roots=@('${R}','D:\\travail\\relecture','D:\\travail\\plans'); foreach($root in $roots){ if(Test-Path -LiteralPath $root){ Write-Output ('ROOT '+$root); Get-ChildItem -LiteralPath $root -Force | Select-Object -First 20 Name,Mode } else { Write-Output ('MISSING '+$root) } }` },
+      { ref: 'cas 8', exacte: false, command: `$ctx='${R}'; $side=Get-ChildItem -LiteralPath (Join-Path $ctx 'projet-demo.claude') -Recurse -File -Filter '*.txt'; $reg=Join-Path $ctx 'projet-demo.claude.md'; $docs=@('D:\\travail\\scratch\\relecture-passe-3.md','D:\\travail\\scratch\\relecture-passe-4.md'); $all=@($side)+@($reg)+@($docs); foreach($f in $all){ if(Test-Path -LiteralPath $f){ Select-String -LiteralPath $f -Pattern 'C-0137' | ForEach-Object { "$($_.Path):$($_.LineNumber)" } } }` },
+      { ref: 'cas 9', exacte: true, command: `$a=[System.IO.File]::ReadAllLines('${R}.claude.md'); for($i=360;$i -lt 364;$i++){ '{0}: {1}' -f ($i+1),$a[$i] }` },
+      { ref: 'cas 10', exacte: false, command: `$root='${R}'; $refs=@('C-0138','C-0139','C-0140','C-0141','C-0142'); $all=Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.txt'; foreach($ref in $refs){ $hits=@($all | Where-Object BaseName -eq $ref); if($hits.Count){ foreach($h in $hits){ "$ref $($h.FullName) $($h.Length)" } } else { "$ref MISSING" } }` },
+      { ref: 'cas 11', exacte: false, command: `$refs=@('C-0138','C-0139','C-0140','C-0141','C-0142'); $paths=rg.exe --files '${R}'; foreach($path in $paths){ if($path -match '(C-\\d{4})\\.txt$' -and $refs -contains $Matches[1]){ $path } }` },
+      { ref: 'cas 12', exacte: true, command: `$root='${R}'; $ids='C-0143','C-0144','C-0145','C-0146','C-0147','C-0148'; foreach($id in $ids){ "===== $id registry ====="; Select-String -LiteralPath "$root\\projet-demo.claude.md" -Pattern ([regex]::Escape($id)); "===== $id full sidecar ====="; $f="$root\\projet-demo.claude\\$id.txt"; if(Test-Path -LiteralPath $f){Get-Content -LiteralPath $f -Raw}else{'SIDE-CAR ABSENT'} }` },
+      { ref: 'cas 13', exacte: true, command: `Get-Content -LiteralPath '${R}\\_general\\C0365.txt'; Get-Content -LiteralPath '${R}\\_general\\C-0149.txt' -ErrorAction SilentlyContinue; git -C 'D:\\travail\\depot' rev-parse HEAD` },
+      { ref: 'cas 14', exacte: true, command: `$dir='${R}\\projet-demo.claude'; foreach($id in @('C-0150','C-0151','C-0152','C-0153')){$p=Join-Path $dir ($id+'.txt'); if(Test-Path $p){'{0} {1} bytes; ' -f $id,(Get-Item $p).Length; wc.exe -l $p; Get-Content -LiteralPath $p -Raw}else{'MISSING '+$id}}` },
+      { ref: 'cas 15', exacte: false, command: `$ErrorActionPreference='Stop'; $dir='D:\\travail\\relecture'; $a=Get-Content -LiteralPath (Join-Path $dir 'controle-integral-audit.md'); $main=@(); $section=''; foreach($l in $a){ if($l -match '^### (M1|M2|M3)$'){$section=$Matches[1]}; if($l -match '^## Inventaire'){$section='SECONDARY'}; if($l -match '^\\|\\s*(\\d+)\\s*\\|'){ $cols=$l.Trim('|').Split('|'); $main += $cols[0] } }; $main | Select-Object -First 8 | ForEach-Object { '{0}' -f $_ }` },
+      { ref: 'cas 16', exacte: false, command: `rg.exe -n -o --no-heading -e '(?:R1-01|R1-02|R1-03|R1-04|R1-05)' '${R}\\projet-demo.claude.md' '${R}\\projet-demo.claude' | Group-Object { ($_ -split ':')[-1] } | ForEach-Object { '{0}={1}' -f $_.Name,$_.Count }` },
+      { ref: 'cas 17', exacte: false, command: `$d='D:\\travail\\relecture'; $p5=Join-Path $d 'relecture-passe-5.md'; $ctx='${R}\\projet-demo.claude.md'; $p5lines=Get-Content -LiteralPath $p5; for($i=0;$i -lt 4;$i++){ if($p5lines[$i] -match '^\\|\\s*(M[123]-[^|]+?)\\s*\\|'){ '{0} {1}' -f $Matches[1],$i } }; Get-Content -LiteralPath $ctx | Select-String -Pattern 'C-0144' | ForEach-Object { $_.LineNumber }` },
+    ];
+    assert.equal(mesures.length, 17);
+    for (const cas of mesures) assert.equal(garde(cas.command), null, `${cas.ref} ${cas.exacte ? 'releve exact' : 'equivalent du releve tronque'} devait passer`);
+});
+test('garde : sous-agent : les scripts de lecture refusent toujours les ecritures et appels dynamiques', () => {
+  const dir = dossier('garde-sous-agent-scripts-2');
+    const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+    const garde = command => avecRacine(dir, () => core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'PowerShell', tool_input: { command }, cwd: CWD_PROJET } }));
+    const refuses = [
+      `foreach($n in @('x.md')){ Remove-Item -LiteralPath '${R}\\$n' }`,
+      `[System.IO.File]::WriteAllText('${R}\\x.md','x')`,
+      `[System.IO.File]::AppendAllText('${R}\\x.md','x')`,
+      `[System.IO.File]::Delete('${R}\\x.md')`,
+      `Get-Content '${R}\\x.md' | ForEach-Object { $_.Delete() }`,
+      `(Get-Item '${R}\\x.md').Replace('${R}\\y.md','x')`,
+      `(Get-Item '${R}\\x.md').Replace('${R}\\y.md','x')`,
+      `Get-Content '${R}\\x.md' | Group-Object { Remove-Item '${R}\\x.md' }`,
+      `Get-Content '${R}\\x.md' | Sort-Object { Invoke-Expression $_ }`,
+      `& $outil '${R}\\x.md'`,
+      `git -C '${R}' push origin main`,
+      `git -C '${R}' branch -D branche-de-sauvegarde`,
+      `git -C '${R}' branch nouvelle-branche`,
+      `git -C '${R}' diff --output='${R}\\x.patch'`,
+      `git -C '${R}' show HEAD`,
+      `git -C '${R}' diff --no-textconv --textconv`,
+      `$(Remove-Item '${R}\\x.md')`,
+      `Get-Content '${R}\\x.md' > '${R}\\y.md'`,
+      `foreach($p in @('${R}\\x.md')){ Set-Content -LiteralPath $p -Value x }`,
+      `for($i=0;$i -lt 100000000;$i++){ Get-Content '${R}\\x.md' }`,
+      `for($i=0;$i -lt 4;$i++){ $i=0; Get-Content '${R}\\x.md' }`,
+      `Get-ChildItem '${R}' | Where-Object { $global:unsafe }`,
+    ];
+    for (const command of refuses) assert.ok(garde(command), `devait refuser : ${command}`);
+});
+test('garde : sous-agent : les boucles et expressions simples de lecture passent', () => {
+  const dir = dossier('garde-sous-agent-scripts-3');
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const garde = command => avecRacine(dir, () => core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'PowerShell', tool_input: { command }, cwd: CWD_PROJET } }));
+  const commandes = [
+    `foreach($i in 1,2){ Get-Content '${R}\\x.md' }`,
+    `$x = Get-Content '${R}\\x.md'`,
+    `Get-Content '${R}\\x.md' | ForEach-Object { $_.Line }`,
+    `Get-ChildItem '${R}' | Where-Object { $_.Name -like 'C-*' } | Sort-Object { $_.Name }`,
+    `Get-ChildItem '${R}' | Group-Object { ($_ -split ':')[-1] } | ForEach-Object { $_.Count }`,
+    `Get-Content '${R}\\x.md' | Select-Object -First 5 | ForEach-Object { $_ }`,
+    `$x=$(Get-Content '${R}\\x.md' -Raw); $x.Length`,
+    `for($i=360;$i -lt 364;$i++){ Get-Content '${R}\\x.md' }`,
+    `git -C '${R}' branch --list 'C-*'`,
+    `git -C '${R}' log --no-textconv --oneline`,
+    `git -C '${R}' show --no-textconv HEAD`,
+    `git -C '${R}' diff --no-textconv --no-ext-diff --stat`,
+  ];
+  for (const command of commandes) assert.equal(garde(command), null, `devait permettre : ${command}`);
+});
+test('garde : sous-agent : parenthese collee a une commande reste refusee', () => {
+  const dir = dossier('garde-sous-agent-scripts-4');
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const garde = command => avecRacine(dir, () => core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'PowerShell', tool_input: { command }, cwd: CWD_PROJET } }));
+  assert.ok(garde(`Get-Content('${R}\\x.md')`));
+});
+
+test('garde : sous-agent : ecritures cachees dans un script restent refusees', () => {
+  const dir = dossier('garde-sous-agent-cachees');
+  const R = 'C:\\Users\\demo\\.agent-memory-ledger\\contexte';
+  const S = 'node "C:/outils/agent-memory-ledger/scripts/codex/context-ledger.js"';
+  const garde = command => avecRacine(dir, () => core.gardeOutil({ input: { hook_event_name: 'PreToolUse', agent_id: 'a42', tool_name: 'Bash', tool_input: { command }, cwd: CWD_PROJET } }));
+  for (const cmd of [
+    `${S} chercher --projet projet-demo C-0112; Set-Content -LiteralPath '${R}\\x.md' -Value x`,
+    `(Get-Item '${R}\\x.md').Delete()`,
+    `Get-Item -LiteralPath $f.MoveTo(Join-Path '${R}' 'y.md')`,
+    `& (Get-Content '${R}\\x.md')`,
+    `&(Get-Content '${R}\\x.md')`,
+    `. (Get-Content '${R}\\x.md')`,
+    `(Remove-Item '${R}\\x.md')`,
+    `Test-Path ([IO.File]::Delete('${R}\\x.md'))`,
+    `Get-ChildItem '${R}' | Where-Object { Remove-Item $_ }`,
+    `Get-ChildItem '${R}' | Where-Object $sb`,
+    `Get-ChildItem '${R}' | Sort-Object $sb`,
+    `Get-ChildItem '${R}' | Get-Content -Path $sb`,
+    `Get-ChildItem '${R}' | Select-Object -Property (Get-Content variable:sb)`,
+      `$p='variable:sb'; Get-ChildItem '${R}' | Select-Object -Property (Get-Content -LiteralPath $p)`,
+    `Sort-Object -InputObject (Get-ChildItem '${R}') -Property $sb`,
+    `Get-Content '${R}\\x.md' | ForEach-Object { '{0}' -f (Remove-Item x) }`,
+    `Get-Content '${R}\\x.md' | % { $_.Delete() }`,
+    `'${R}\\x.md'`,
+    `"cat x" '${R}\\x.md'`,
+    `& 'C:\\Program Files\\x\\rm.exe' '${R}\\x.md'`,
+    `(Get-Content '${R}\\x.md') > y.txt`,
+    `cat '${R}\\x.md' ${String.fromCharCode(1)}`,
+  ]) {
+    if (cmd.includes('Set-Content')) {
+      assert.equal(core.commandeLectureOuCli(cmd, { agentId: 'a42' }), false, `analyseur devait refuser : ${cmd}`);
+    }
+    assert.ok(garde(cmd), `devait refuser : ${cmd}`);
+  }
+  // Bout en bout : l'aide se lit et une boucle qui ne fait que lire passe.
+  assert.equal(preTool(dir, 'Bash', { command: `${S} help` }, { agent_id: 'a42' }).out, '');
+  const r = preTool(dir, 'Bash', { command: `foreach($i in 1,2){ Get-Content '${R}\\x.md' }` }, { agent_id: 'a42' });
+  assert.equal(r.out, '');
+  const h = cli(dir, ['help']);
+  assert.equal(h.code, 0, h.err);
+  assert.match(h.out, /^Usage : node context-ledger\.js <commande>/);
+  assert.match(h.out, /un identifiant \(chercher C-0151 C-0152 M-0042\) rend la ligne ou le message entier/);
+  assert.match(h.out, /--agent claude\|codex/);
 });
 
 // Constat réel du 2026-10-07 : 6 écritures refusées chez 5 sous-agents qui écrivaient LEUR rapport, hors de
@@ -1164,7 +1296,7 @@ function copie(nom, fichierRel, ancre, remplacement) {
   const src = path.join(path.dirname(HOOK), '..');
   const dest = path.join(RUN, nom, 'scripts');
   for (const d of ['claude', 'lib']) fs.mkdirSync(path.join(dest, d), { recursive: true });
-  for (const f of ['claude/context-ledger.js', 'lib/context-ledger-core.js', 'lib/config.js', 'lib/commande-git.js']) {
+  for (const f of ['claude/context-ledger.js', 'lib/context-ledger-core.js', 'lib/config.js', 'lib/commande-git.js', 'secours-worker.js']) {
     fs.copyFileSync(path.join(src, f), path.join(dest, f));
   }
   if (ancre) {
@@ -1183,8 +1315,8 @@ function copie(nom, fichierRel, ancre, remplacement) {
   return path.join(dest, 'claude', 'context-ledger.js');
 }
 
-function relancer(hookCopie, motif) {
-  const env = Object.assign({}, process.env, { CONTEXT_LEDGER_HOOK: hookCopie, CONTEXT_LEDGER_EN_MUTATION: '1' });
+function relancer(hookCopie, motif, variables = {}) {
+  const env = Object.assign({}, process.env, variables, { CONTEXT_LEDGER_HOOK: hookCopie, CONTEXT_LEDGER_EN_MUTATION: '1' });
   delete env.CONTEXT_LEDGER_DIR;
   delete env.NODE_TEST_CONTEXT;
   return spawnSync(process.execPath, ['--test', '--test-reporter=tap', `--test-name-pattern=${motif}`, __filename], {
@@ -1583,6 +1715,159 @@ test('copie de secours : son dossier n\'est pas relu à chaque événement, sa l
   fs.mkdirSync(autre, { recursive: true });
   avecSecours(autre, () => assert.deepEqual(avecRacine(dir, () => core.listerProjetsTous('claude')), ['_general', PROJET]));
   assert.deepEqual(JSON.parse(fs.readFileSync(gardee, 'utf8')).projets, []);
+});
+
+test('copie de secours asynchrone : le hook rend la main avant une copie lente, copie cohérente et journal amputé restauré', () => {
+  const dir = dossier('secours-async');
+  const secours = path.join(RUN, 'secours-async-copie');
+  const debutCopie = path.join(RUN, 'secours-async-copie-demarree');
+  const finCopie = path.join(RUN, 'secours-async-copie-terminee');
+  const prechargement = path.join(RUN, 'secours-async-prechargement.cjs');
+  const principal = path.join(dir, `${PROJET}.claude.journal.log`);
+  const sauvegarde = path.join(secours, `${PROJET}.claude.journal.log`);
+
+  const premier = avecSecours(secours, () => ups(dir, 'Première entrée conservée', { session_id: 'sess-secours', prompt_id: 'p-secours-1' }));
+  assert.equal(premier.code, 0, premier.err);
+  const ancienJournal = fs.readFileSync(principal, 'utf8');
+  assert.equal(fs.readFileSync(sauvegarde, 'utf8'), ancienJournal);
+
+  // Précharge qui ralentit la première écriture vers le dossier de secours (un disque lent) de six secondes.
+  const sourcePrechargement = String.raw`'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const racine = path.resolve(process.env.CONTEXT_LEDGER_TEST_SLOW_DIR).toLowerCase();
+const originalWrite = fs.writeFileSync;
+const originalCopy = fs.copyFileSync;
+const originalAppend = fs.appendFileSync;
+function ralentir(destination) {
+  const cible = path.resolve(String(destination)).toLowerCase();
+  if (cible.startsWith(racine + path.sep) && process.env.CONTEXT_LEDGER_TEST_SLOW_COPY_DONE !== '1') {
+    process.env.CONTEXT_LEDGER_TEST_SLOW_COPY_DONE = '1';
+    originalWrite.call(fs, process.env.CONTEXT_LEDGER_TEST_SLOW_STARTED, 'demarree');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6000);
+    originalWrite.call(fs, process.env.CONTEXT_LEDGER_TEST_SLOW_FINISHED, 'terminee');
+  }
+}
+fs.writeFileSync = function (destination) {
+  ralentir(destination);
+  return originalWrite.apply(this, arguments);
+};
+fs.copyFileSync = function (source, destination) {
+  ralentir(destination);
+  return originalCopy.apply(this, arguments);
+};
+fs.appendFileSync = function (destination) {
+  ralentir(destination);
+  return originalAppend.apply(this, arguments);
+};
+`;
+  fs.writeFileSync(prechargement, sourcePrechargement);
+  const nodeOptions = `${process.env.NODE_OPTIONS || ''} --require=${prechargement}`.trim();
+  const optionsAsynchrones = {
+    node: [],
+    env: {
+      CONTEXT_LEDGER_SECOURS_DIR: secours,
+      CONTEXT_LEDGER_SECOURS_SYNCHRONE: '0',
+      CONTEXT_LEDGER_TEST_SLOW_DIR: secours,
+      CONTEXT_LEDGER_TEST_SLOW_STARTED: debutCopie,
+      CONTEXT_LEDGER_TEST_SLOW_FINISHED: finCopie,
+      NODE_OPTIONS: nodeOptions,
+    },
+  };
+  const asynchrone = ups(dir, 'Deuxième entrée conservée', { session_id: 'sess-secours', prompt_id: 'p-secours-2' }, optionsAsynchrones);
+  assert.equal(asynchrone.code, 0, asynchrone.err);
+
+  const attente = new Int32Array(new SharedArrayBuffer(4));
+  const attendre = (condition, delai) => {
+    const limite = Date.now() + delai;
+    while (!condition() && Date.now() < limite) Atomics.wait(attente, 0, 0, 25);
+    return condition();
+  };
+  assert.ok(attendre(() => fs.existsSync(debutCopie), 10000), 'le travailleur a commencé la copie ralentie');
+  assert.ok(!fs.existsSync(finCopie), 'le hook a rendu la main pendant que la copie était ralentie');
+  const verrou = path.join(dir, '.secours-worker.lock');
+  assert.ok(fs.existsSync(verrou), 'un seul travailleur détaché tient le verrou pendant la copie');
+  const pendantCopie = ups(dir, 'Troisième entrée pendant la copie', { session_id: 'sess-secours', prompt_id: 'p-secours-3' }, optionsAsynchrones);
+  assert.equal(pendantCopie.code, 0, pendantCopie.err);
+  assert.ok(!fs.existsSync(finCopie), 'une autre écriture du hook ne reste pas bloquée par la copie');
+  assert.ok(fs.readdirSync(dir).filter(n => n.startsWith('.secours-a-synchroniser.')).length >= 2, 'la seconde écriture laisse un jalon au travailleur actif');
+  assert.ok(attendre(() => fs.existsSync(finCopie), 20000), 'la copie ralentie se termine');
+  assert.ok(attendre(() => {
+    try { return fs.readFileSync(sauvegarde, 'utf8') === fs.readFileSync(principal, 'utf8') && !fs.existsSync(verrou); }
+    catch (_) { return false; }
+  }, 10000), 'la copie finale est cohérente et le travailleur a libéré son verrou');
+
+  const lignesCompletes = fs.readFileSync(sauvegarde, 'utf8').split(/\r?\n/).filter(Boolean);
+  assert.ok(lignesCompletes.length >= 2, 'le journal contient plusieurs événements');
+  fs.writeFileSync(principal, lignesCompletes.slice(0, -1).join('\n') + '\n');
+  const rejoue = avecRacine(dir, () => avecSecours(secours, () => core.rejouerJournal(PROJET, 'claude')));
+  assert.ok(rejoue, 'le journal est rejoué par l\'API exportée');
+  assert.ok(journal(dir).some(e => e.evt === 'restauration-journal' && e.raison === 'journal principal amputé'));
+  const restaure = fs.readFileSync(principal, 'utf8');
+  for (const ligne of lignesCompletes) assert.ok(restaure.includes(ligne), 'la ligne perdue revient depuis la copie');
+  assert.equal(restaure, fs.readFileSync(sauvegarde, 'utf8'));
+});
+
+test('copie de secours asynchrone en panne : l\'avertissement est visible puis le jalon est rattrapé', () => {
+  const dir = dossier('secours-async-panne');
+  const parentBloque = path.join(RUN, 'secours-async-parent-fichier');
+  fs.writeFileSync(parentBloque, 'fichier, pas un dossier');
+  const impossible = path.join(parentBloque, 'copie');
+  const premier = ups(dir, 'Message pendant la panne asynchrone', {}, {
+    node: [], env: { CONTEXT_LEDGER_SECOURS_DIR: impossible, CONTEXT_LEDGER_SECOURS_SYNCHRONE: '0' },
+  });
+  assert.equal(premier.code, 0, premier.err);
+
+  const attente = new Int32Array(new SharedArrayBuffer(4));
+  const attendre = (condition, delai) => {
+    const limite = Date.now() + delai;
+    while (!condition() && Date.now() < limite) Atomics.wait(attente, 0, 0, 25);
+    return condition();
+  };
+  const etatPanne = path.join(dir, '.secours-etat.json');
+  assert.ok(attendre(() => fs.existsSync(etatPanne) && !fs.existsSync(path.join(dir, '.secours-worker.lock')), 10000), 'le travailleur a signalé l\'échec puis libéré son verrou');
+  assert.equal(JSON.parse(fs.readFileSync(etatPanne, 'utf8')).ok, false);
+  const demarrage = hook(dir, { hook_event_name: 'SessionStart', session_id: 'sess-panne', cwd: CWD_PROJET, source: 'startup' }, {
+    node: [], env: { CONTEXT_LEDGER_SECOURS_DIR: impossible, CONTEXT_LEDGER_SECOURS_SYNCHRONE: '0' },
+  });
+  assert.match(contexte(demarrage), /ATTENTION : la copie de secours du fichier contexte est en panne/);
+
+  const secours = path.join(RUN, 'secours-async-repare');
+  const suivant = ups(dir, 'Message après réparation asynchrone', { session_id: 'sess-reprise', prompt_id: 'p-reprise' }, {
+    node: [], env: { CONTEXT_LEDGER_SECOURS_DIR: secours, CONTEXT_LEDGER_SECOURS_SYNCHRONE: '0' },
+  });
+  assert.equal(suivant.code, 0, suivant.err);
+  const principal = path.join(dir, `${PROJET}.claude.journal.log`);
+  const sauvegarde = path.join(secours, `${PROJET}.claude.journal.log`);
+  assert.ok(attendre(() => {
+    try {
+      return fs.readFileSync(principal, 'utf8') === fs.readFileSync(sauvegarde, 'utf8')
+        && !fs.existsSync(etatPanne)
+        && !fs.existsSync(path.join(dir, '.secours-worker.lock'))
+        && fs.readdirSync(dir).every(n => !n.startsWith('.secours-a-synchroniser.'));
+    } catch (_) { return false; }
+  }, 15000), 'le prochain événement rattrape le jalon et efface l\'avertissement');
+});
+
+test('mutation : la copie asynchrone redevient synchrone -> banc rouge', { skip: EN_MUTATION }, () => {
+  const motif = 'copie de secours asynchrone';
+  const variables = { CONTEXT_LEDGER_SECOURS_SYNCHRONE: '0' };
+  const sourceCore = path.join(path.dirname(HOOK), '..', 'lib', 'context-ledger-core.js');
+  const shaAvant = crypto.createHash('sha256').update(fs.readFileSync(sourceCore)).digest('hex');
+  const temoin = relancer(copie('temoin-secours-asynchrone'), motif, variables);
+  assert.equal(temoin.status, 0, 'copie non mutée doit rester verte :\n' + temoin.stdout);
+  const mutant = copie(
+    'mutation-secours-asynchrone',
+    'lib/context-ledger-core.js',
+    'ancre-mutation:secours-asynchrone',
+    '      synchroniserSecoursSynchrone(projet, agent, bloc); // MUTATION : attente synchrone du disque lent',
+  );
+  const resultat = relancer(mutant, motif, variables);
+  assert.notEqual(resultat.status, 0, 'le retour au chemin synchrone doit rendre le banc rouge :\n' + resultat.stdout);
+  assert.match(resultat.stdout, /not ok \d+ - copie de secours asynchrone/);
+  const shaApres = crypto.createHash('sha256').update(fs.readFileSync(sourceCore)).digest('hex');
+  assert.equal(shaApres, shaAvant, 'la mutation est isolée dans sa copie, le fichier source est restauré à l\'identique');
 });
 
 test('mutation : copie de secours ou restauration désactivée, ou dossier de secours relu à chaque événement -> banc rouge', { skip: EN_MUTATION }, () => {
@@ -2494,8 +2779,10 @@ test('mutation : fiches de sous-agents, lecture de la liste, signalements, budge
     ['reprise-sans-mission', "  const sansMission = f.index.mission ? '' : ' Ta mission n\\'y a pas été copiée : si le résumé ne te la rend pas mot pour mot, redemande-la à l\\'orchestrateur avant de continuer, puis recopie-la dans ta fiche (note --genre mission).'; // MUTATION : ancienne formulation", /not ok \d+ - fiche de sous-agent : démarrage avant/, NOYAU, '^fiche de sous-agent : d.marrage'],
     ['chercher-id', '      const t = null; // MUTATION : un identifiant cherché comme un simple mot', /not ok \d+ - chercher/, NOYAU, '^chercher'],
     ['cli-help', '    // MUTATION : help inconnue de la CLI', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
-    ['blocs-surs', '  let masque = masquerChaines(c); // MUTATION : blocs sans effet refusés comme avant', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
-    ['sous-expression-collee', '      // MUTATION : parenthèse collée à un nom (méthode) remplacée aussi', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
+    // Analyse des scripts de lecture (boucles, blocs, méthodes) : les mutations « blocs sans effet refusés comme
+    // avant » et « parenthèse collée remplacée » ont laissé place à celles de l'analyseur qui les remplace.
+    ['blocs-dangereux', '    // MUTATION : bloc qui contient une écriture accepté', /not ok \d+ - garde : sous-agent : ecritures cachees dans un script restent refusees/, NOYAU, '^garde : sous-agent : ecritures cachees dans un script restent refusees$'],
+    ['methodes-ecriture', '    // MUTATION : méthode non listée acceptée', /not ok \d+ - garde : sous-agent : ecritures cachees dans un script restent refusees/, NOYAU, '^garde : sous-agent : ecritures cachees dans un script restent refusees$'],
     ['sous-expression-appel', '    // MUTATION : & (x) accepté', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
     ['variable-pipeline', '    // MUTATION : variable acceptée après un |', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],
     ['masque-utf16', '  const masque = [...c]; // MUTATION : masque par points de code, segments décalés', /not ok \d+ - garde : sous-agent : sous-expressions/, NOYAU, GARDE],

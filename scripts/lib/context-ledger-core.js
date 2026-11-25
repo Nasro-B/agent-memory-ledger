@@ -28,8 +28,13 @@
  *   .etat\<projet>.<agent>.json.illisible-<ts>   JSON illisible mis de côté (jamais supprimé)
  *   .secours-<agent>.jsonl            messages de l'utilisateur qu'un incident a empêché d'enregistrer
  *   .secours-etat.json                présent seulement quand la copie de secours est en panne
+ *   .secours-a-synchroniser.*.json    jalons de la copie asynchrone (un par écriture de journal, retirés par le
+ *                                     travailleur) ; .secours-worker.lock : verrou de ce travailleur
  * COPIE DE SECOURS (hors racine, facultative) : racineSecours() = %CONTEXT_LEDGER_SECOURS_DIR% ; sans cette
- *   variable, pas de copie. Chaque journal y est recopié à chaque écriture ; un journal principal perdu ou
+ *   variable, pas de copie. La copie est ASYNCHRONE : le hook dépose un jalon dans la racine et détache un
+ *   travailleur (scripts/secours-worker.js) qui touche le dossier de secours, pour qu'un disque lent ne fasse pas
+ *   dépasser son budget au hook ; %CONTEXT_LEDGER_SECOURS_SYNCHRONE%=1 la rend synchrone (bancs).
+ *   Chaque journal y est recopié à chaque écriture ; un journal principal perdu ou
  *   amputé est reconstruit depuis cette copie (texteJournal), racine entièrement effacée comprise. La liste
  *   de ses projets est gardée dans la racine (.secours-projets.<agent>.json) : son dossier, qui peut être
  *   sur un disque lent, n'est relu que si cette liste manque ou a plus de dix minutes.
@@ -95,8 +100,9 @@
  *   tacheParAlias(agent, sessionId, alias) -> id|null
  *   texteLivraisons({agent, sessionId, dernierMessage}) -> rappel de fin de tour ('' si rien)
  *   texteFins(taches) -> annonce courte des fins qui viennent d'arriver
- *   texteSuiviEnCours({agent, sessionId}) -> en cours de tour : signalements des sous-agents, fins pas encore
- *        annoncées à l'orchestrateur, rappel des résultats qui attendent (au plus une fois par délai) ; '' sinon
+ *   texteSuiviEnCours({agent, sessionId, force}) -> en cours de tour : signalements des sous-agents, fins pas encore
+ *        annoncées à l'orchestrateur, rappel des résultats qui attendent (au plus une fois par délai, ou à chaque appel
+ *        avec force : nouveau message, démarrage, reprise, liste redonnée après un compactage, rapport de fin) ; '' sinon
  *
  * Signalements entre agents principaux (boîte par agent : <racine>\.signalements\<agent>.jsonl, jamais réécrite)
  *   signalerAgent({de, vers, projet, ligne, genre, texte}) -> signalement   sur une ligne encore ouverte de `vers`
@@ -159,6 +165,8 @@
  *   noterCommitsSousAgent({agent, sessionId, id, commits}) -> nombre noté ; texteCommitsAgents(agent, sessionId)
  *        -> annonce, une seule fois, des commits faits par des sous-agents : ils ne ferment jamais une ligne
  *   texteDeMachine(texte) -> bool    texte soumis par une machine (demande générée par l'application), pas par l'utilisateur
+ *   expediteurMessageAgent(texte) -> id|null   « <agent-message from="ID"> » : le rapport de fin d'un sous-agent, remis
+ *        comme un tour de l'utilisateur, n'est jamais un message de l'utilisateur (aucun numéro M)
  *   nettoyerTemporaires() -> nombre  fichiers .tmp d'écritures interrompues, vieux de plus d'une heure
  *   avertissementsAjout({projet, agent, texte, de}) -> string[]   conseils rendus par « ajouter » (jamais un refus)
  *   reconcilier({agent, base}) -> {faits, partiels, ignores, projets, insistants}
@@ -241,9 +249,9 @@ const RAISON_SHELL = 'Sur la racine contexte, le shell ne sert qu\'à lire (cat,
 // refusait aussi la LECTURE : mesuré cette nuit-là, 19 refus dans 7 sous-agents Codex et le même refus dans
 // 23 sous-agents Claude, tous pour lire le registre ou une fiche C (recouper un reste avec la liste).
 // Depuis : lecture permise, écriture toujours refusée, et une fiche par sous-agent pour ses propres notes.
-// Le 2026-10-02, 48 des 91 lectures encore refusées étaient des boucles sur des C-NNNN.txt : d'où « chercher »
-// par identifiant, et le rappel qu'une lecture se fait sans boucle ni script.
-const RAISON_SOUS_AGENT = 'Seul l\'orchestrateur écrit dans le fichier contexte. Toi, sous-agent, tu peux le LIRE, jamais le modifier : lis avec une commande simple, une par lecture, sans boucle ni script (Get-Content, cat, Select-String ou rg sur un fichier nommé ; Get-Content x | Select-Object -Index 10,20 pour des lignes précises) ou avec la commande context-ledger « chercher » (chercher C-0151 C-0152 rend ces lignes entières ; --agent claude ou --agent codex pour la liste d\'un autre agent) ; ajouter, etat, sans-travail et abandon sont réservés à l\'orchestrateur. Ce que tu trouves se note dans ta fiche (commande « note ») ou dans ton rapport : rends ton résultat à l\'orchestrateur, il mettra le fichier contexte à jour.' + AIDE_TEXTE;
+// Près de la moitié des lectures encore refusées étaient des boucles sur des C-NNNN.txt : d'où « chercher » par
+// identifiant. Les boucles passent si chaque commande reconnue ne fait que lire.
+const RAISON_SOUS_AGENT = 'Seul l\'orchestrateur écrit dans le fichier contexte. Toi, sous-agent, tu peux le LIRE, jamais le modifier : utilise une commande de lecture vérifiable ; les boucles et scripts passent seulement si chaque étape ne fait que lire (Get-Content, cat, Select-String, rg, git log/show/diff avec --no-textconv, git grep, ou la commande context-ledger « chercher » : chercher C-0151 C-0152 rend ces lignes entières ; --agent claude ou --agent codex pour la liste d\'un autre agent). Ajouter, etat, sans-travail et abandon restent réservés à l\'orchestrateur. Ce que tu trouves se note dans ta fiche (commande « note ») ou dans ton rapport : rends ton résultat à l\'orchestrateur, il mettra le fichier contexte à jour.' + AIDE_TEXTE;
 // Sous-commandes de la CLI qu'un sous-agent peut appeler (lecture) ; « note » en plus, sur sa propre fiche.
 const CLI_SOUS_AGENT = new Set(['lister', 'chercher', 'fiche', 'help', '--help', '-h', 'aide']);
 
@@ -270,7 +278,7 @@ const LECTURE = new Set([
   'test-path', 'get-item', 'gi', 'resolve-path', 'join-path', 'cd', 'set-location', 'sl', 'pushd', 'popd',
   'get-location', 'pwd', 'format-hex',
   // Fin de pipeline qui ne fait qu'afficher ou compter (formes relevées dans les lectures refusées).
-  'measure-object', 'select-object', 'sort-object', 'out-string', 'format-table', 'format-list',
+  'measure-object', 'select-object', 'sort-object', 'group-object', 'out-string', 'format-table', 'format-list',
   'write-output', 'write-host', 'echo',
 ]);
 // Affectation PowerShell d'une chaîne littérale ($p='...'), sans interpolation : n'exécute rien.
@@ -288,10 +296,10 @@ const BLOCS_SURS = [
   `\\{\\s*(?:'[^']*'|"[^"]*")\\s+-f\\s+${TERME_OBJET}(?:\\s*,\\s*${TERME_OBJET})*\\s*\\}`,
   `\\{\\s*${TERME_OBJET}\\s+${COMPARAISON}\\s+${LITTERAL}\\s*\\}`,
 ].join('|');
-const RE_BLOC_SUR = new RegExp(BLOCS_SURS, 'gi');
 const RE_SEGMENT_BLOC = new RegExp(`^(?:foreach-object|foreach|%|where-object|where)\\s*(?:${BLOCS_SURS})\\s*$`, 'i');
-// Where-Object sans bloc, sur une propriété et une valeur littérale (Where-Object Name -like '*projet*').
-const RE_SEGMENT_FILTRE = new RegExp(`^(?:where-object|where)\\s+(?:-property\\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\s+${COMPARAISON}\\s+(?:-value\\s+)?${LITTERAL}\\s*$`, 'i');
+// Where-Object sans bloc, sur une propriété et une valeur littérale ou une variable (Where-Object Name -like '*projet*').
+const VALEUR_SIMPLE = `(?:${LITTERAL}|\\$[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?(?:\\[-?\\d+\\])?)`;
+const RE_SEGMENT_FILTRE = new RegExp(`^(?:where-object|where)\\s+(?:-property\\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\s+${COMPARAISON}\\s+(?:-value\\s+)?${VALEUR_SIMPLE}\\s*$`, 'i');
 // Sous-expression ( ) dont le contenu est lui-même une lecture ((Get-Content x).Count, Get-Item -LiteralPath
 // (Join-Path $d 'x')) : remplacée, pour l'analyse seulement, par une marque de même longueur (caractère 1,
 // refusé dans une commande). L'accès qui la suit (.Count, [0]) reste à sa place ; une parenthèse collée à un
@@ -299,10 +307,11 @@ const RE_SEGMENT_FILTRE = new RegExp(`^(?:where-object|where)\\s+(?:-property\\s
 const MARQUE_SOUS_EXPRESSION = String.fromCharCode(1);
 const RE_SEGMENT_SOUS_EXPRESSION = new RegExp(`^${MARQUE_SOUS_EXPRESSION}+(?:\\.[A-Za-z_][A-Za-z0-9_]*|\\[-?\\d+(?:\\.\\.-?\\d+)?\\])*$`);
 const MAX_SOUS_EXPRESSIONS = 8;
+const MAX_ITERATIONS_LECTURE = 10000;
 // Fins de pipeline dont un argument peut être un bloc exécuté pour chaque objet (Select-Object -Property
 // @{ e = { ... } }, Sort-Object { ... }) : une variable y est refusée, elle pourrait porter un tel bloc
 // préparé par une commande précédente qui, elle, ne visait pas la racine.
-const PIPELINE_A_BLOC = new Set(['select-object', 'sort-object', 'format-table', 'format-list', 'measure-object']);
+const PIPELINE_A_BLOC = new Set(['select-object', 'sort-object', 'group-object', 'format-table', 'format-list', 'measure-object']);
 const RE_CLI_SEGMENT = /^["']?(?:[^"'\s]*[\\/])?node(?:\.exe)?["']?\s+(?:"(?:[^"]*[\\/])?context-ledger\.js"|'(?:[^']*[\\/])?context-ledger\.js'|(?:[^"'\s]*[\\/])?context-ledger\.js)(?=\s|$)/i;
 // Écriture d'un texte littéral hors de la racine (voir ecritureDeTexteLitteral). Outils dont la commande part
 // à coup sûr dans PowerShell ; marque qui remplace le here-string pendant l'analyse (caractère 2, refusé dans
@@ -584,11 +593,216 @@ function avertissementSecours() {
   } catch (_) { return ''; }
 }
 
-// Après chaque écriture du journal principal : la copie reçoit le même bloc. Si elle a pris du retard
-// (écriture manquée, disque absent un moment), elle est recopiée en entier. Si elle en sait PLUS que le
-// principal (principal amputé), lireJournal fusionne les deux. Ne lève jamais : la copie de secours ne
-// doit pas faire échouer l'écriture principale.
-function synchroniserSecours(projet, agent, bloc) {
+// Copie asynchrone (le mode par défaut dès que le dossier de secours est posé) : le dossier de secours peut être
+// sur un disque lent ou en veille, et un hook qui l'attend dépasse son budget de temps. Le hook ne touche donc pas
+// à ce disque : il dépose un jalon local dans la racine, puis détache UN processus travailleur (scripts/
+// secours-worker.js) qui recopie les journaux jalonnés. Un seul travailleur à la fois (verrou de secours, périmé
+// quand son processus est mort) ; une écriture faite pendant sa copie laisse un jalon de plus, traité avant qu'il
+// ne rende son verrou. Une panne (disque absent, droits) est tracée dans .secours-etat.json, dite au démarrage,
+// et le jalon suivant rattrape tout. CONTEXT_LEDGER_SECOURS_SYNCHRONE=1 rend la copie synchrone (bancs qui
+// inspectent la copie avant de rendre la main).
+const PREFIXE_JALON_SECOURS = '.secours-a-synchroniser.';
+const NOM_VERROU_SECOURS = '.secours-worker.lock';
+const VERROU_SECOURS_PERIME_MS = 30000;
+
+function fichierVerrouSecours() { return path.join(racine(), NOM_VERROU_SECOURS); }
+
+function listerJalonsSecours() {
+  return fs.readdirSync(lp(racine()))
+    .filter(n => n.startsWith(PREFIXE_JALON_SECOURS) && n.endsWith('.json'))
+    .sort();
+}
+
+function creerJalonSecours(projet, agent) {
+  const f = path.join(racine(), `${PREFIXE_JALON_SECOURS}${process.pid}.${crypto.randomBytes(8).toString('hex')}.json`);
+  const tmp = `${f}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(lp(tmp), JSON.stringify({ projet: validerProjet(projet), agent: validerAgent(agent) }) + '\n', { flag: 'wx' });
+    fs.renameSync(lp(tmp), lp(f));
+  } catch (e) {
+    try { fs.unlinkSync(lp(tmp)); } catch (_) { /* rien */ }
+    throw e;
+  }
+  return f;
+}
+
+function processusVivant(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
+}
+
+function libererVerrouSecours(f, token) {
+  try {
+    const v = JSON.parse(sansBom(lireTexte(f) || ''));
+    if (v.token === token) fs.unlinkSync(lp(f));
+  } catch (_) { /* déjà libéré ou illisible */ }
+}
+
+// Retire un verrou dont le propriétaire est mort (ou, sans propriétaire lisible, de plus de 30 s). Vrai si le
+// verrou n'existe plus. Il n'est jamais retiré tant que son processus est vivant.
+function retirerVerrouSecoursPerime(f) {
+  let texte;
+  let st;
+  try { texte = lireTexte(f); st = fs.statSync(lp(f)); } catch (e) { return e.code === 'ENOENT'; }
+  if (!texte) return false;
+  let v;
+  try { v = JSON.parse(sansBom(texte)); } catch (_) {
+    if (Date.now() - st.mtimeMs < VERROU_SECOURS_PERIME_MS) return false;
+    return deplacerVerrouSecoursPerime(f, texte);
+  }
+  const pid = Number(v.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return Date.now() - st.mtimeMs >= VERROU_SECOURS_PERIME_MS && deplacerVerrouSecoursPerime(f, texte);
+  if (processusVivant(pid)) return false;
+  return deplacerVerrouSecoursPerime(f, texte);
+}
+
+function deplacerVerrouSecoursPerime(f, texte) {
+  const perime = `${f}.perime-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  try { fs.renameSync(lp(f), lp(perime)); } catch (e) { return e.code === 'ENOENT'; }
+  const obtenu = lireTexte(perime);
+  if (obtenu === texte) {
+    try { fs.unlinkSync(lp(perime)); } catch (_) { /* déjà retiré */ }
+    return true;
+  }
+  try {
+    if (!fs.existsSync(lp(f))) fs.renameSync(lp(perime), lp(f));
+  } catch (_) { /* ne jamais supprimer un verrou dont le propriétaire a changé */ }
+  return false;
+}
+
+// Réserve le verrou du travailleur (création d'un lien : atomique). Rend { f, token } ou null s'il est tenu.
+function prendreVerrouSecours() {
+  const f = fichierVerrouSecours();
+  for (let essai = 0; essai < 2; essai++) {
+    const token = crypto.randomBytes(16).toString('hex');
+    const tmp = `${f}.${token}.tmp`;
+    try {
+      fs.writeFileSync(lp(tmp), JSON.stringify({ token, pid: process.pid, demarreLe: Date.now() }) + '\n', { flag: 'wx' });
+      fs.linkSync(lp(tmp), lp(f));
+      try { fs.unlinkSync(lp(tmp)); } catch (_) { /* le lien de réservation est déjà publié */ }
+      return { f, token };
+    } catch (e) {
+      try { fs.unlinkSync(lp(tmp)); } catch (_) { /* rien */ }
+      if (e.code !== 'EEXIST') throw e;
+      if (!retirerVerrouSecoursPerime(f)) return null;
+    }
+  }
+  return null;
+}
+
+// Le hook a réservé le verrou ; une fois le travailleur lancé, le verrou porte SON pid.
+function actualiserVerrouSecours(f, token, pid) {
+  const texte = lireTexte(f);
+  if (!texte) return false;
+  let v;
+  try { v = JSON.parse(sansBom(texte)); } catch (_) { return false; }
+  if (v.token !== token) return false;
+  ecrireAtomique(f, JSON.stringify({ token, pid, demarreLe: Date.now() }) + '\n');
+  return true;
+}
+
+// Le travailleur attend que le verrou porte son pid (le hook l'y écrit juste après le lancement).
+function revendiquerVerrouSecours(f, token) {
+  const limite = Date.now() + VERROU_SECOURS_PERIME_MS;
+  for (;;) {
+    const texte = lireTexte(f);
+    if (!texte) return false;
+    let v;
+    try { v = JSON.parse(sansBom(texte)); } catch (_) { return false; }
+    if (v.token !== token) return false;
+    if (Number(v.pid) === process.pid) return true;
+    if (Date.now() >= limite) return false;
+    dormir(10);
+  }
+}
+
+// Recopie le journal principal dans la copie : fusionne d'abord (copie plus complète que le principal amputé),
+// sous le verrou de l'état, puis écrit la copie hors de ce verrou (le disque lent n'y retient personne).
+function synchroniserSecoursEnArrierePlan(projet, agent) {
+  const s = journalSecours(projet, agent);
+  if (!s) return;
+  const c = chemins(projet, agent);
+  const copie = chronometrer('secours_ms', () => lireTexte(s));
+  let principal;
+  avecVerrou(c.json, () => {
+    const fusion = texteJournal(projet, agent, { texteSecours: copie, sansEcritureSecours: true });
+    if (fusion === null) throw new Error(`journal principal et copie absents : ${c.journal}`);
+    principal = lireTexte(c.journal);
+    if (principal === null) throw new Error(`journal principal absent après fusion : ${c.journal}`);
+  });
+  ecrireAtomique(s, principal);
+  ajouterProjetSecours(agent, projet);
+  noterSecours(true);
+}
+
+// Corps du travailleur : traite les jalons jusqu'à ce qu'il n'y en ait plus, rend son verrou, puis revérifie (un
+// jalon arrivé pendant le rendu relance un tour). Appelé par scripts/secours-worker.js avec le jeton du verrou.
+function traiterSecoursEnAttente(token) {
+  let verrou = fichierVerrouSecours();
+  let actif = token;
+  if (!revendiquerVerrouSecours(verrou, actif)) return;
+  try {
+    for (;;) {
+      const jalons = listerJalonsSecours();
+      if (!jalons.length) {
+        libererVerrouSecours(verrou, actif);
+        actif = null;
+        if (!listerJalonsSecours().length) return;
+        const suivant = prendreVerrouSecours();
+        if (!suivant) return;
+        verrou = suivant.f;
+        actif = suivant.token;
+        if (!revendiquerVerrouSecours(verrou, actif)) return;
+        continue;
+      }
+      for (const nom of jalons) {
+        const f = path.join(racine(), nom);
+        const texte = lireTexte(f);
+        if (texte === null) continue;
+        const j = JSON.parse(sansBom(texte));
+        const projet = validerProjet(j.projet);
+        const agent = validerAgent(j.agent);
+        synchroniserSecoursEnArrierePlan(projet, agent);
+        try { fs.unlinkSync(lp(f)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      }
+    }
+  } catch (e) {
+    noterSecours(false, e && e.message ? e.message : String(e));
+    throw e;
+  } finally {
+    if (actif) libererVerrouSecours(verrou, actif);
+  }
+}
+
+function lancerTravailleurSecours() {
+  const reservation = prendreVerrouSecours();
+  if (!reservation) return; // un travailleur est déjà actif : il verra le jalon
+  const { spawn } = require('child_process');
+  const script = path.join(__dirname, '..', 'secours-worker.js');
+  let enfant;
+  try {
+    enfant = spawn(process.execPath, [script, reservation.token], {
+      detached: true, stdio: 'ignore', windowsHide: true, env: process.env,
+    });
+    enfant.once('error', e => {
+      libererVerrouSecours(reservation.f, reservation.token);
+      noterSecours(false, e && e.message ? e.message : String(e));
+    });
+    if (enfant.pid && !actualiserVerrouSecours(reservation.f, reservation.token, enfant.pid)) {
+      throw new Error('le verrou du travailleur a changé avant son démarrage');
+    }
+    enfant.unref();
+  } catch (e) {
+    libererVerrouSecours(reservation.f, reservation.token);
+    noterSecours(false, e && e.message ? e.message : String(e));
+  }
+}
+
+// Copie synchrone, réservée aux bancs qui inspectent la copie avant de rendre la main
+// (CONTEXT_LEDGER_SECOURS_SYNCHRONE=1). Après chaque écriture du journal principal : la copie reçoit le même
+// bloc. Si elle a pris du retard (écriture manquée, disque absent un moment), elle est recopiée en entier. Si
+// elle en sait PLUS que le principal (principal amputé), lireJournal fusionne les deux. Ne lève jamais : la copie
+// de secours ne doit pas faire échouer l'écriture principale.
+function synchroniserSecoursSynchrone(projet, agent, bloc) {
   const s = journalSecours(projet, agent);
   if (!s) return; // ancre-mutation:secours-copie
   try {
@@ -610,18 +824,33 @@ function synchroniserSecours(projet, agent, bloc) {
   } catch (e) { noterSecours(false, e && e.message ? e.message : String(e)); }
 }
 
+// Le hook ne touche pas au disque lent : il dépose un jalon local puis détache un travailleur unique.
+function synchroniserSecours(projet, agent, bloc) {
+  if (!journalSecours(projet, agent)) return;
+  if (process.env.CONTEXT_LEDGER_SECOURS_SYNCHRONE === '1') return synchroniserSecoursSynchrone(projet, agent, bloc);
+  try {
+    chronometrer('secours_ms', () => {
+      creerJalonSecours(projet, agent);
+      lancerTravailleurSecours(); // ancre-mutation:secours-asynchrone
+    });
+  } catch (e) { noterSecours(false, e && e.message ? e.message : String(e)); }
+}
+
 function lignesJournal(t) { return t === null ? [] : sansBom(t).split(/\r?\n/).filter(l => l.trim()); }
 function horodatageLigne(l) { try { return chaine(JSON.parse(l).ts); } catch (_) { return ''; } }
 
 // Texte du journal principal, réparé depuis la copie de secours quand il a perdu des lignes (journal
 // supprimé ou amputé, racine effacée). Fusion par ordre d'horodatage ; les deux fichiers sont réécrits.
-function texteJournal(projet, agent) {
+// options.texteSecours : texte de la copie déjà lu par l'appelant ; options.sansEcritureSecours : ne pas réécrire la
+// copie (le travailleur la réécrit lui-même, hors verrou).
+function texteJournal(projet, agent, options = {}) {
   const c = chemins(projet, agent);
   const t = lireTexte(c.journal);
   const s = journalSecours(projet, agent);
   if (!s) return t;
   let ts = null;
-  try { ts = chronometrer('secours_ms', () => lireTexte(s)); } catch (_) { ts = null; }
+  if (Object.prototype.hasOwnProperty.call(options, 'texteSecours')) ts = options.texteSecours;
+  else { try { ts = chronometrer('secours_ms', () => lireTexte(s)); } catch (_) { ts = null; } }
   if (ts === null || ts === t) return t;
   const principales = lignesJournal(t);
   const copie = lignesJournal(ts);
@@ -636,7 +865,9 @@ function texteJournal(projet, agent) {
   fusion.push(JSON.stringify({ ts: maintenantIso(), evt: 'restauration-journal', lignes: perdues.length, raison: t === null ? 'journal principal absent' : 'journal principal amputé', source: s }));
   const texte = fusion.join('\n') + '\n';
   try { ecrireAtomique(c.journal, texte); } catch (_) { /* l'état est quand même reconstruit depuis le texte fusionné */ }
-  try { ecrireAtomique(s, texte); } catch (_) { /* la copie sera resynchronisée à la prochaine écriture */ }
+  if (!options.sansEcritureSecours) {
+    try { ecrireAtomique(s, texte); } catch (_) { /* la copie sera resynchronisée à la prochaine écriture */ }
+  }
   return texte;
 }
 
@@ -1216,6 +1447,15 @@ function texteDeMachine(texte) {
   return DEBUTS_DE_MACHINE.some(d => debut.startsWith(d)); // ancre-mutation:texte-de-machine
 }
 
+// Message d'un AUTRE agent, que l'application remet comme un tour de l'utilisateur : le rapport de fin d'un
+// sous-agent (« <agent-message from="ID"> », ID = celui de la tâche lancée), ou le message d'une autre session.
+// Ce n'est pas un message de l'utilisateur : il ne reçoit jamais de numéro M. Rend l'identifiant de
+// l'expéditeur, ou null.
+function expediteurMessageAgent(texte) {
+  const m = /^<agent-message\s+from="([^"\r\n]{1,200})"\s*>/.exec(chaine(texte).trimStart()); // ancre-mutation:message-d-agent
+  return m ? m[1] : null;
+}
+
 // Fichiers « .tmp » laissés par une écriture atomique interrompue (processus tué entre l'écriture et le
 // renommage). Seuls ceux de la forme écrite par ecrireAtomique (<fichier>.<pid>.<8 hexa>.tmp), vieux de plus d'une
 // heure, sont retirés, dans la racine, .etat et .sessions. Retourne leur nombre.
@@ -1634,7 +1874,11 @@ function texteSignalements(agent, sessionId, taches) {
 
 // En cours de tour, sur un événement que l'orchestrateur lit avant de s'arrêter (outil, message, reprise) :
 // les signalements de ses sous-agents, puis leurs fins et le rappel de ce qui attend.
-function texteSuiviEnCours({ agent, sessionId }) {
+// force : un sous-agent fini ne doit jamais s'oublier « après un compactage ou après des demandes multiples ».
+// Sur un événement où l'attention de l'agent change (nouveau message, démarrage, reprise, liste redonnée après un
+// compactage, rapport de fin reçu), TOUT ce qui attend est redit, sans attendre le délai du rappel. Jamais sur un
+// simple outil : le rappel y reste borné par son délai.
+function texteSuiviEnCours({ agent, sessionId, force }) {
   validerAgent(agent);
   const s = lireSession(agent, sessionId);
   // Signalements d'un autre agent principal sur une ligne de cette liste (boîte de l'agent).
@@ -1646,7 +1890,7 @@ function texteSuiviEnCours({ agent, sessionId }) {
   const taches = s && estObjet(s.taches) ? s.taches : {};
   if (!Object.values(taches).some(t => estObjet(t) && !t.clos)) return [agents, commits].filter(Boolean).join('\n');
   const signalements = texteSignalements(agent, sessionId, taches);
-  const fins = texteFinsEtRappel(agent, sessionId, s, taches);
+  const fins = texteFinsEtRappel(agent, sessionId, s, taches, !!force);
   return [agents, commits, signalements, fins].filter(Boolean).join('\n');
 }
 
@@ -1655,8 +1899,9 @@ function texteSuiviEnCours({ agent, sessionId }) {
 // 7 résultats sans rappel.
 //  - fin pas encore dite à l'orchestrateur : annonce courte, une fois ;
 //  - résultat déjà annoncé qui attend depuis plus du délai : rappel de tout ce qui attend, au plus une
-//    fois par délai (20 minutes).
-function texteFinsEtRappel(agent, sessionId, s, taches) {
+//    fois par délai (20 minutes) ;
+//  - force : rappel complet de tout ce qui attend, quel que soit le délai, avec le chemin de chaque résultat.
+function texteFinsEtRappel(agent, sessionId, s, taches, force) {
   if (!Object.values(taches).some(t => estObjet(t) && t.fini && !t.clos)) return '';
   let etat;
   try { etat = livraisons({ agent, sessionId }); } catch (_) { return ''; }
@@ -1667,10 +1912,12 @@ function texteFinsEtRappel(agent, sessionId, s, taches) {
   // Délai compté depuis l'annonce, pas depuis la fin : une fin ancienne annoncée à l'instant n'est pas
   // rappelée dans la foulée (constaté en réel : annonce puis rappel à une demi-seconde d'écart).
   const rappeler = age(s.rappelLivraisons) >= delai && etat.attente.some(t => t.annonce && age(t.annonce) >= delai); // ancre-mutation:livraison-rappel-en-cours
-  if (!nouvelles.length && !rappeler) return '';
-  noterAnnonce(agent, sessionId, nouvelles, rappeler);
-  if (!rappeler) return texteFins(nouvelles);
-  const liste = etat.attente.slice(0, MAX_LIVRAISONS).map(t => `${t.ligne} « ${t.titre} »`).join(' ; ');
+  // force : rappel complet dès qu'une fin DÉJÀ annoncée attend encore (une fin toute neuve garde son annonce courte).
+  const complet = rappeler || (!!force && etat.attente.some(t => t.annonce)); // ancre-mutation:livraison-rappel-force
+  if (!nouvelles.length && !complet) return '';
+  noterAnnonce(agent, sessionId, nouvelles, complet);
+  if (!complet) return texteFins(nouvelles);
+  const liste = etat.attente.slice(0, MAX_LIVRAISONS).map(t => (force ? decrireTache(t) : `${t.ligne} « ${t.titre} »`)).join(' ; '); // ancre-mutation:chemin-du-resultat
   const plus = etat.attente.length > MAX_LIVRAISONS ? ` ; et ${etat.attente.length - MAX_LIVRAISONS} autre(s)` : '';
   return `Rappel : ${etat.attente.length} sous-agent(s) TERMINÉ(S) dont le résultat n'est toujours pas traité : ${liste}${plus}. N'attends pas la fin du tour : dès que l'étape en cours est finie, lis chaque résultat (son chemin est dans la note de sa ligne), vérifie-le, intègre-le, puis cite [ctx C-NNNN] dans l'historique.${texteEnCours(etat)}`;
 }
@@ -2721,12 +2968,78 @@ function cliPermiseAuSousAgent(seg, agentId) {
   return fiche === agentId; // ancre-mutation:note-propre-fiche
 }
 
+function jetonsShellSimples(c) {
+  const s = chaine(c);
+  const jetons = [];
+  let i = 0;
+  while (i < s.length) {
+    while (/\s/.test(s[i] || '')) i++;
+    if (i >= s.length) break;
+    const debut = i;
+    const q = s[i] === '"' || s[i] === '\'' ? s[i++] : '';
+    if (q) {
+      for (; i < s.length; i++) {
+        if (s[i] !== q) continue;
+        if (q === '\'' && s[i + 1] === '\'') { i++; continue; }
+        break;
+      }
+      if (i >= s.length) return null;
+      jetons.push(s.slice(debut + 1, i).replace(/''/g, '\''));
+      i++;
+    } else {
+      while (i < s.length && !/\s/.test(s[i])) i++;
+      jetons.push(s.slice(debut, i));
+    }
+  }
+  return jetons;
+}
+
+function commandeGitLecture(seg) {
+  const jetons = jetonsShellSimples(seg);
+  if (!jetons || !jetons.length) return false;
+  const exe = jetons[0].replace(/\\/g, '/').split('/').pop().toLowerCase().replace(/\.exe$/, '');
+  if (exe !== 'git') return false;
+  let i = 1;
+  while (i < jetons.length) {
+    const brut = jetons[i];
+    const a = brut.toLowerCase();
+    if (brut === '-c' || a === '--config-env') return false;
+    if (brut === '-C' || a === '--git-dir' || a === '--work-tree') {
+      if (!jetons[i + 1]) return false;
+      i += 2;
+      continue;
+    }
+    if (a === '--no-pager' || a === '--no-replace-objects' || a.startsWith('--git-dir=') || a.startsWith('--work-tree=')) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  const commande = (jetons[i] || '').toLowerCase();
+  if (!new Set(['status', 'log', 'show', 'grep', 'rev-parse', 'diff', 'ls-files', 'branch', 'describe', 'cat-file', 'rev-list']).has(commande)) return false;
+  const args = jetons.slice(i + 1);
+  const dangereux = /^(?:--(?:exec|exec-path|textconv|ext-diff|external-diff|open-files-in-pager|pager|paginate|output))(?:=|$)/i;
+  if (args.some(a => dangereux.test(a))) return false;
+  if (['diff', 'log', 'show'].includes(commande) && !args.some(a => a.toLowerCase() === '--no-textconv')) return false;
+  if (['diff', 'log', 'show'].includes(commande) && args.some(a => /^-o(?:$|.)/i.test(a))) return false;
+  if (commande === 'branch') {
+    if (args.some(a => /^(?:--(?:delete|move|copy|force|edit-description|set-upstream-to|unset-upstream|create-reflog|track|no-track)|-[^-]*[dDmMcCfFt])(?:=|$)/i.test(a))) return false;
+    const modeListe = args.some(a => new Set([
+      '--list', '-l', '-a', '-r', '--all', '--remotes', '--show-current', '--contains', '--no-contains',
+      '--merged', '--no-merged', '--points-at', '--format', '--sort', '--color', '--abbrev', '--column', '--no-column',
+    ]).has(a.toLowerCase()));
+    if (!modeListe && args.some(a => !a.startsWith('-'))) return false;
+  }
+  return true;
+}
+
 // sousAgent : { agentId } quand l'appelant est un sous-agent (CLI restreinte), sinon rien.
 // opts : { masque : le même segment, chaînes vidées ; pipeline : vrai s'il reçoit la sortie d'un | }.
 function segmentAutorise(seg, sousAgent, opts) {
   const o = opts || {};
   const s = seg.replace(/^[&\s]+/, '');
   if (!s) return true;
+  if (/^(?:get-content|gc)\b/i.test(s) && /\bvariable:/i.test(s)) return false;
   if (RE_CLI_SEGMENT.test(s)) return sousAgent ? cliPermiseAuSousAgent(s, sousAgent.agentId) : true; // ancre-mutation:cli-sous-agent
   if (RE_AFFECTATION_LITTERALE.test(s)) return true;
   // Sous-expression de lecture seule, avec son accès ((Get-Content x).Count). Après l'opérateur d'appel &,
@@ -2741,12 +3054,13 @@ function segmentAutorise(seg, sousAgent, opts) {
   let tok = (m[1] || m[2] || m[3]).replace(/\\/g, '/');
   tok = tok.slice(tok.lastIndexOf('/') + 1).toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
   if (tok === 'rg' && /(?:^|\s)--pre(?:=|\s|$)/i.test(s)) return false; // rg --pre exécute une commande par fichier
+  if (tok === 'git') return commandeGitLecture(s);
   if (!LECTURE.has(tok)) return false;
   // Variable ou sous-expression en argument : refusée après un | (liaison différée : un bloc qu'elle porterait
   // serait exécuté pour chaque objet reçu) et dans les fins de pipeline qui exécutent des blocs.
   if (o.pipeline || PIPELINE_A_BLOC.has(tok)) {
     const masque = typeof o.masque === 'string' ? o.masque.slice(seg.length - s.length) : s;
-    const args = masque.slice(m[0].length).replace(/\$(?:null|true|false)\b/gi, '');
+    const args = masque.slice(m[0].length).replace(new RegExp(MARQUE_SOUS_EXPRESSION, 'g'), ' ').replace(/\$(?:null|true|false)\b/gi, '');
     if (args.includes('$') || args.includes(MARQUE_SOUS_EXPRESSION)) return false; // ancre-mutation:variable-pipeline
   }
   return true;
@@ -2807,9 +3121,12 @@ function marquerSousExpressions(c, masque, sousAgent, profondeur) {
     const avantTour = masque;
     let change = false;
     masque = avantTour.replace(/\(([^()]*)\)/g, (x, interieur, pos) => {
-      if (pos > 0 && !/[\s(,@<]/.test(avantTour[pos - 1])) return x; // ancre-mutation:sous-expression-collee
+      if (pos > 0 && !/[\s(,@<+=\-*\/%]/.test(avantTour[pos - 1])) return x;
       const contenu = c.slice(pos + 1, pos + x.length - 1);
-      if (!/\S/.test(contenu) || !commandeLectureOuCli(contenu, sousAgent, profondeur + 1)) return x;
+      const videArray = !/\S/.test(contenu) && avantTour[pos - 1] === '@';
+      const lecture = /\S/.test(contenu) && (commandeLectureOuCli(contenu, sousAgent, profondeur + 1)
+        || expressionLecturePure(contenu, { allowLiteral: true }));
+      if (!videArray && !lecture) return x;
       change = true;
       const marque = MARQUE_SOUS_EXPRESSION.repeat(x.length);
       c = c.slice(0, pos) + marque + c.slice(pos + x.length);
@@ -2843,19 +3160,343 @@ function cliSeuleDuSousAgent(cmd, agentId) {
   return appels.length > 0 && appels.every(s => RE_CLI_SEGMENT.test(s) && cliPermiseAuSousAgent(s, agentId));
 }
 
+const METHODES_NET_STATIQUES_LECTURE = new Map([
+  ['io.file', new Set(['readalltext', 'readalllines', 'readallbytes', 'exists'])],
+  ['system.io.file', new Set(['readalltext', 'readalllines', 'readallbytes', 'exists'])],
+  ['io.directory', new Set(['getfiles', 'getdirectories', 'enumeratefiles', 'enumeratedirectories', 'exists'])],
+  ['system.io.directory', new Set(['getfiles', 'getdirectories', 'enumeratefiles', 'enumeratedirectories', 'exists'])],
+  ['io.path', new Set(['combine', 'getfilename', 'getdirectoryname', 'getextension', 'getfullpath'])],
+  ['system.io.path', new Set(['combine', 'getfilename', 'getdirectoryname', 'getextension', 'getfullpath'])],
+  ['regex', new Set(['escape', 'match', 'matches'])],
+  ['system.text.regularexpressions.regex', new Set(['escape', 'match', 'matches'])],
+]);
+const METHODES_NET_INSTANCE_LECTURE = new Set([
+  'trim', 'trimstart', 'trimend', 'split', 'substring', 'tolower', 'tolowerinvariant',
+  'toupper', 'toupperinvariant', 'startswith', 'endswith', 'contains', 'indexof', 'lastindexof',
+  'equals', 'compareto',
+]);
+
+function parentheseFermante(c, debut) {
+  let profondeur = 0;
+  let guillemet = '';
+  for (let i = debut; i < c.length; i++) {
+    const ch = c[i];
+    if (guillemet === '\'') {
+      if (ch === '\'' && c[i + 1] === '\'') { i++; continue; }
+      if (ch === '\'') guillemet = '';
+      continue;
+    }
+    if (guillemet === '"') {
+      if (ch === '"') { guillemet = ''; continue; }
+      if (ch === '$' && c[i + 1] === '(') {
+        const fin = parentheseFermante(c, i + 1);
+        if (fin < 0) return -1;
+        i = fin;
+      }
+      continue;
+    }
+    if (ch === '\'' || ch === '"') { guillemet = ch; continue; }
+    if (ch === '(') profondeur++;
+    else if (ch === ')' && --profondeur === 0) return i;
+  }
+  return -1;
+}
+
+function separerNiveauZero(c, separateur) {
+  const masque = masquerChaines(c);
+  const morceaux = [];
+  let debut = 0;
+  let parenthese = 0;
+  let crochet = 0;
+  let accolade = 0;
+  for (let i = 0; i < masque.length; i++) {
+    const ch = masque[i];
+    if (ch === '(') parenthese++;
+    else if (ch === ')') parenthese--;
+    else if (ch === '[') crochet++;
+    else if (ch === ']') crochet--;
+    else if (ch === '{') accolade++;
+    else if (ch === '}') accolade--;
+    if (parenthese === 0 && crochet === 0 && accolade === 0 && masque.startsWith(separateur, i)) {
+      morceaux.push(c.slice(debut, i).trim());
+      debut = i + separateur.length;
+      i += separateur.length - 1;
+    }
+  }
+  morceaux.push(c.slice(debut).trim());
+  return morceaux;
+}
+
+function expressionLecturePure(expression, options) {
+  const o = options || {};
+  const niveau = o.niveau || 0;
+  if (niveau > MAX_SOUS_EXPRESSIONS) return false;
+  let c = chaine(expression).trim();
+  if (!c || c.includes('`')) return false;
+  for (let tour = 0; tour < MAX_SOUS_EXPRESSIONS; tour++) {
+    const masque = masquerChaines(c);
+    const m = /\(([^()]*)\)/.exec(masque);
+    if (!m) break;
+    const debut = m.index;
+    const fin = debut + m[0].length - 1;
+    const avant = masque[debut - 1] || '';
+    if (avant && !/[\s(,@+\-*/%,!]/.test(avant)) return false;
+    const interieur = c.slice(debut + 1, fin);
+    if (!interieur.trim() && avant !== '@') return false;
+    if (interieur.trim() && !expressionLecturePure(interieur, { allowLiteral: true, niveau: niveau + 1 })) return false;
+    c = c.slice(0, debut) + MARQUE_SOUS_EXPRESSION.repeat(fin - debut + 1) + c.slice(fin + 1);
+  }
+  let masque = masquerChaines(c);
+  if (/[(){}]/.test(masque)) return false;
+  const guillemets = masque.match(/['"]/g) || [];
+  if (guillemets.filter(x => x === "'").length % 2 || guillemets.filter(x => x === '"').length % 2) return false;
+  masque = masque.replace(/['"]/g, ' ');
+  let atome = false;
+  masque = masque.replace(new RegExp(`${MARQUE_SOUS_EXPRESSION}+(?:\\.[A-Za-z_]\\w*|\\[-?\\d+\\])*`, 'g'), () => { atome = true; return ' '; });
+  masque = masque.replace(new RegExp(MARQUE_SOUS_EXPRESSION, 'g'), () => { atome = true; return ' '; });
+  masque = masque.replace(/\$(?:(?:env):[A-Za-z_]\w*|(?:[A-Za-z_]\w*|_))(?:\.[A-Za-z_]\w*)*(?:\[\s*(?:-?\d+|\$[A-Za-z_]\w*)\s*\])*/gi, () => { atome = true; return ' '; });
+  masque = masque.replace(/-?\d+(?:\.\d+)?/g, () => { atome = true; return ' '; });
+  masque = masque.replace(/-(?:[ci])?(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|in|notin|and|or|xor|not|split|join|f|as|is|isnot|replace)\b/gi, () => { atome = true; return ' '; });
+  if (/[^\s,[\]()+\-*\/%@!]/.test(masque)) return false;
+  return atome || o.allowLiteral === true;
+}
+
+function valeurLectureOuCommande(expression, sousAgent, profondeur) {
+  return expressionLecturePure(expression, { allowLiteral: true }) || commandeLectureOuCli(expression, sousAgent, profondeur);
+}
+
+function affectationLocaleLecture(segment, sousAgent, profondeur) {
+  const m = /^\s*\$([A-Za-z_]\w*)\s*(\+=|=)\s*([\s\S]+?)\s*$/.exec(segment);
+  if (!m) return false;
+  const nom = m[1].toLowerCase();
+  if (['executioncontext', 'host', 'psdefaultparametervalues', 'psmoduleautoloadingpreference', 'psscriptroot', 'pscommandpath', 'profile', 'matches'].includes(nom)) return false;
+  if (nom === 'erroractionpreference') return m[2] === '=' && /^['"]Stop['"]$/i.test(m[3]);
+  return valeurLectureOuCommande(m[3], sousAgent, (profondeur || 0) + 1);
+}
+
+function neutraliserSousExpressions(c, sousAgent, profondeur) {
+  let texte = c;
+  let guillemet = '';
+  for (let i = 0; i < texte.length; i++) {
+    const ch = texte[i];
+    if (guillemet === '\'') {
+      if (ch === '\'' && texte[i + 1] === '\'') { i++; continue; }
+      if (ch === '\'') guillemet = '';
+      continue;
+    }
+    if (guillemet === '"') {
+      if (ch === '"') { guillemet = ''; continue; }
+      if (ch !== '$' || texte[i + 1] !== '(') continue;
+    } else if (ch === '\'' || ch === '"') {
+      guillemet = ch;
+      continue;
+    } else if (ch !== '$' || texte[i + 1] !== '(') continue;
+    const fin = parentheseFermante(texte, i + 1);
+    if (fin < 0) return null;
+    const interieur = texte.slice(i + 2, fin);
+    if (!valeurLectureOuCommande(interieur, sousAgent, (profondeur || 0) + 1)) return null;
+    const marque = MARQUE_SOUS_EXPRESSION.repeat(fin - i + 1);
+    texte = texte.slice(0, i) + marque + texte.slice(fin + 1);
+    i += marque.length - 1;
+  }
+  return texte;
+}
+
+function argumentsLecturePure(c) {
+  if (!c.trim()) return true;
+  return separerNiveauZero(c, ',').every(x => expressionLecturePure(x, { allowLiteral: true }));
+}
+
+function neutraliserMethodesLecture(c) {
+  let texte = c;
+  for (let tour = 0; tour < 32; tour++) {
+    const masque = masquerChaines(texte);
+    const candidats = [];
+    const statiques = /::\s*([A-Za-z_]\w*)\s*\(/g;
+    let m;
+    while ((m = statiques.exec(masque))) {
+      const ouverture = m.index + m[0].lastIndexOf('(');
+      const fermeture = parentheseFermante(texte, ouverture);
+      if (fermeture < 0) return null;
+      const avant = /\[([A-Za-z_][A-Za-z0-9_.+]*)\]\s*$/.exec(masque.slice(0, m.index));
+      const type = avant ? avant[1].toLowerCase() : '';
+      const methode = m[1].toLowerCase();
+      const permises = METHODES_NET_STATIQUES_LECTURE.get(type);
+      const debut = avant ? m.index - avant[0].length : m.index;
+      candidats.push({ debut, ouverture, fermeture, autorise: !!permises && permises.has(methode) });
+    }
+    const instances = /\.([A-Za-z_]\w*)\s*\(/g;
+    while ((m = instances.exec(masque))) {
+      const ouverture = m.index + m[0].lastIndexOf('(');
+      const fermeture = parentheseFermante(texte, ouverture);
+      if (fermeture < 0) return null;
+      const prefixe = masque.slice(0, m.index);
+      const recepteur = /(?:\$(?:[A-Za-z_]\w*|_)(?:\.[A-Za-z_]\w*)*(?:\[-?\d+\])*|\x01+)$/.exec(prefixe);
+      const debut = recepteur ? m.index - recepteur[0].length : m.index;
+      candidats.push({ debut, ouverture, fermeture, autorise: !!recepteur && METHODES_NET_INSTANCE_LECTURE.has(m[1].toLowerCase()) });
+    }
+    if (!candidats.length) break;
+    candidats.sort((a, b) => a.fermeture - b.fermeture);
+    const appel = candidats[0];
+    if (!appel.autorise || !argumentsLecturePure(texte.slice(appel.ouverture + 1, appel.fermeture))) return null; // ancre-mutation:methodes-ecriture
+    texte = texte.slice(0, appel.debut) + MARQUE_SOUS_EXPRESSION.repeat(appel.fermeture - appel.debut + 1) + texte.slice(appel.fermeture + 1);
+    if (tour === 31) return null;
+  }
+  return texte;
+}
+
+function debutSegmentAvant(c, limite) {
+  const masque = masquerChaines(c);
+  let parenthese = 0;
+  let crochet = 0;
+  let debut = 0;
+  for (let i = 0; i < limite; i++) {
+    const ch = masque[i];
+    if (ch === '(') parenthese++;
+    else if (ch === ')') parenthese--;
+    else if (ch === '[') crochet++;
+    else if (ch === ']') crochet--;
+    if (parenthese || crochet) continue;
+    if (masque.startsWith('&&', i) || masque.startsWith('||', i)) {
+      debut = i + 2;
+      i++;
+    } else if (ch === ';' || ch === '|' || ch === '&' || ch === '\r' || ch === '\n') debut = i + 1;
+  }
+  return debut;
+}
+
+function premiereAccolade(c) {
+  const masque = masquerChaines(c);
+  let parenthese = 0;
+  let crochet = 0;
+  for (let i = 0; i < masque.length; i++) {
+    if (masque[i] === '(') parenthese++;
+    else if (masque[i] === ')') parenthese--;
+    else if (masque[i] === '[') crochet++;
+    else if (masque[i] === ']') crochet--;
+    else if (masque[i] === '{' && parenthese === 0 && crochet === 0) return i;
+  }
+  return -1;
+}
+
+function accoladeFermante(c, debut) {
+  const masque = masquerChaines(c);
+  let profondeur = 0;
+  for (let i = debut; i < masque.length; i++) {
+    if (masque[i] === '{') profondeur++;
+    else if (masque[i] === '}' && --profondeur === 0) return i;
+  }
+  return -1;
+}
+
+function boucleForLecture(header, corps) {
+  const m = /^for\s*\(([\s\S]*)\)$/i.exec(header.trim());
+  if (!m) return false;
+  const parties = separerNiveauZero(m[1], ';');
+  if (parties.length !== 3) return false;
+  const init = /^\$([A-Za-z_]\w*)\s*=\s*(-?\d+)$/i.exec(parties[0]);
+  if (!init) return false;
+  const nom = init[1];
+  const condition = new RegExp(`^\\$${nom}\\s+-(lt|le|gt|ge)\\s+(-?\\d+|\\$[A-Za-z_]\\w*(?:\\.(?:Count|Length))?)$`, 'i').exec(parties[1]);
+  if (!condition) return false;
+  const etape = new RegExp(`^(?:\\$${nom}\\s*\\+\\+|\\+\\+\\$${nom}|\\$${nom}\\s*--|--\\$${nom}|\\$${nom}\\s*\\+=\\s*1|\\$${nom}\\s*=\\s*\\$${nom}\\s*\\+\\s*1|\\$${nom}\\s*-=\\s*1|\\$${nom}\\s*=\\s*\\$${nom}\\s*-\\s*1)$`, 'i').exec(parties[2]);
+  if (!etape) return false;
+  const descend = /(?:--|-=\s*1|\s-\s1)$/i.test(parties[2]);
+  if (descend !== /^(?:gt|ge)$/i.test(condition[1])) return false;
+  if (condition[2].toLowerCase() === ('$' + nom).toLowerCase()) return false;
+  if (!/^-?\d+$/.test(condition[2])) return false;
+  const debut = Number(init[2]);
+  const borne = Number(condition[2]);
+  if (!Number.isSafeInteger(debut) || !Number.isSafeInteger(borne)) return false;
+  const operateur = condition[1].toLowerCase();
+  const iterations = operateur === 'lt' ? Math.max(0, borne - debut)
+    : operateur === 'le' ? Math.max(0, borne - debut + 1)
+      : operateur === 'gt' ? Math.max(0, debut - borne)
+        : Math.max(0, debut - borne + 1);
+  if (iterations > MAX_ITERATIONS_LECTURE) return false;
+  const affectationIndex = new RegExp(`\\$${nom}\\s*(?:\\+=|-=|=|\\+\\+|--)|(?:\\+\\+|--)\\$${nom}\\b`, 'i');
+  if (affectationIndex.test(masquerChaines(corps))) return false;
+  return expressionLecturePure(parties[1], { allowLiteral: true });
+}
+
+function neutraliserBlocsLecture(c, sousAgent, profondeur) {
+  let texte = c;
+  const masqueInitial = masquerChaines(texte);
+  const vide = /@\{\s*\}/g;
+  let m;
+  const vides = [];
+  while ((m = vide.exec(masqueInitial))) vides.push([m.index, m.index + m[0].length]);
+  for (let i = vides.length - 1; i >= 0; i--) {
+    const [debut, fin] = vides[i];
+    texte = texte.slice(0, debut) + MARQUE_SOUS_EXPRESSION.repeat(fin - debut) + texte.slice(fin);
+  }
+  for (let tour = 0; tour < 64; tour++) {
+    const ouverture = premiereAccolade(texte);
+    if (ouverture < 0) return /[{}]/.test(masquerChaines(texte)) ? null : texte;
+    const fermeture = accoladeFermante(texte, ouverture);
+    if (fermeture < 0) return null;
+    const debut = debutSegmentAvant(texte, ouverture);
+    const header = texte.slice(debut, ouverture).trim();
+    const corps = texte.slice(ouverture + 1, fermeture);
+    let type = '';
+    let expression = '';
+    let corpsSur;
+    let controle = false;
+    let mm = /^foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\s+([\s\S]*)\)$/i.exec(header);
+    if (mm) {
+      controle = true;
+      type = 'foreach';
+      expression = mm[2];
+      corpsSur = valeurLectureOuCommande(expression, sousAgent, (profondeur || 0) + 1)
+        && commandeLectureOuCli(corps, sousAgent, (profondeur || 0) + 1);
+    } else if (/^for\s*\(/i.test(header)) {
+      controle = true;
+      type = 'for';
+      corpsSur = boucleForLecture(header, corps) && commandeLectureOuCli(corps, sousAgent, (profondeur || 0) + 1);
+    } else if ((mm = /^(?:if|elseif)\s*\(([\s\S]*)\)$/i.exec(header))) {
+      controle = true;
+      type = 'if';
+      expression = mm[1];
+      corpsSur = valeurLectureOuCommande(expression, sousAgent, (profondeur || 0) + 1)
+        && commandeLectureOuCli(corps, sousAgent, (profondeur || 0) + 1);
+    } else if (/^else$/i.test(header)) {
+      controle = true;
+      type = 'else';
+      corpsSur = commandeLectureOuCli(corps, sousAgent, (profondeur || 0) + 1);
+    } else {
+      const bloc = /^(foreach-object|%|where-object|where|group-object|sort-object|select-object)(?:\s+-process)?$/i.exec(header);
+      if (!bloc) return null;
+      type = bloc[1].toLowerCase();
+      corpsSur = type === 'foreach-object' || type === '%'
+        ? (expressionLecturePure(corps) || commandeLectureOuCli(corps, sousAgent, (profondeur || 0) + 1))
+        : expressionLecturePure(corps);
+    }
+    if (!corpsSur) return null; // ancre-mutation:blocs-dangereux
+    if (controle) texte = texte.slice(0, debut) + ' ' + texte.slice(fermeture + 1);
+    else texte = texte.slice(0, debut) + 'Select-Object' + texte.slice(fermeture + 1);
+    if (tour === 63) return null;
+  }
+  return null;
+}
+
 // Vrai si la commande ne fait que lire (ou appeler la CLI context-ledger). profondeur : contenu d'une
 // sous-expression (appel récursif), où la marque des sous-expressions intérieures est légitime.
 function commandeLectureOuCli(cmd, sousAgent, profondeur) {
   const niveau = profondeur || 0;
   let c = chaine(cmd);
-  if (/\$\(|`/.test(c)) return false; // substitution de commande : pas analysable, refus
+  if (niveau > MAX_SOUS_EXPRESSIONS || /`/.test(c)) return false;
+  if (/\b(?:get-content|gc)\b/i.test(c) && /\bvariable:/i.test(c)) return false;
   if (!niveau && c.includes(MARQUE_SOUS_EXPRESSION)) return false;
   if (!niveau && lectureAmbigue(c)) return false; // ancre-mutation:lecture-ambigue
-  // Blocs sans effet ({ $_.Line }, format, filtre) neutralisés à longueur égale : les positions restent valables.
-  let masque = masquerChaines(c).replace(RE_BLOC_SUR, x => ' '.repeat(x.length)); // ancre-mutation:blocs-surs
+  c = neutraliserSousExpressions(c, sousAgent, niveau);
+  if (c === null) return false;
+  c = neutraliserMethodesLecture(c);
+  if (c === null) return false;
+  c = neutraliserBlocsLecture(c, sousAgent, niveau);
+  if (c === null) return false;
+  let masque = masquerChaines(c);
   ({ c, masque } = marquerSousExpressions(c, masque, sousAgent, niveau));
-  // Parenthèses et accolades restantes hors guillemets : substitution de processus <( ) d'une écriture,
-  // méthode (Get-Item x).Delete(), Test-Path ([IO.File]::Delete(..)), boucle, bloc { } : refus.
+  // Les groupes non neutralisés restent ambigus : substitution de processus, appel dynamique ou bloc inconnu.
   if (/[(){}]/.test(masque)) return false;
   const reRedir = /(?:\d|&)?>{1,2}\s*(&\d|[^\s;|&<>]*)/g;
   let m;
@@ -2876,7 +3517,11 @@ function commandeLectureOuCli(cmd, sousAgent, profondeur) {
     const d = brut.length - brut.trimEnd().length;
     const seg = brut.trim();
     if (!seg) continue;
-    if (avant === '&' && seg.startsWith(MARQUE_SOUS_EXPRESSION)) return false; // ancre-mutation:sous-expression-appel (& (x) exécute ce que x nomme)
+    if (/^\.\s+/.test(seg)) return false;
+    if (avant === '|' && affectationLocaleLecture(seg, sousAgent, niveau)) return false;
+    if (avant === '&' && (seg.startsWith(MARQUE_SOUS_EXPRESSION) || !segmentAutorise(seg, sousAgent, { masque: masque.slice(a + g, b - d), pipeline: false }))) return false; // ancre-mutation:sous-expression-appel
+    if (affectationLocaleLecture(seg, sousAgent, niveau)) continue;
+    if (expressionLecturePure(seg, { allowLiteral: niveau > 0 })) continue;
     if (!segmentAutorise(seg, sousAgent, { masque: masque.slice(a + g, b - d), pipeline: avant === '|' })) return false;
   }
   return true;
@@ -3064,6 +3709,15 @@ function ecritureDeTexteLitteral(cmd, cwd, sousAgent) {
   return commandeLectureOuCli(reste, sousAgent); // ancre-mutation:texte-reste-lecture
 }
 
+function lectureRawAffectee(cmd, sousAgent) {
+  if (lectureAmbigue(cmd)) return false;
+  const m = /^\s*\$([A-Za-z_]\w*)\s*=\s*((?:Get-Content|gc)\s+[\s\S]+?)\s*;\s*\$\1\.(?:Length|Count)\s*$/i.exec(cmd);
+  if (!m) return false;
+  const masque = masquerChaines(m[2]);
+  if (!/(?:^|\s)-Raw(?:\s|$)/i.test(masque) || /[|;&\r\n$]/.test(masque)) return false;
+  return commandeLectureOuCli(m[2], sousAgent);
+}
+
 // powershell : l'appelant sait que la commande part dans PowerShell (outil PowerShell, ou adaptateur qui le
 // sait pour son agent). Sans cette preuve, l'écriture d'un texte littéral n'est pas reconnue.
 function gardeOutil({ input, generique, powershell }) {
@@ -3083,15 +3737,16 @@ function gardeOutil({ input, generique, powershell }) {
     const touche = texteToucheRacine(cmd) || commandeViseRacine(cmd, dossier);
     // Texte littéral écrit hors de la racine (un rapport qui cite la liste) : seulement en PowerShell prouvé.
     const texte = qui => (powershell === true || OUTILS_POWERSHELL.includes(tn)) && ecritureDeTexteLitteral(cmd, dossier, qui); // ancre-mutation:texte-powershell
+    const lecture = qui => commandeLectureOuCli(cmd, qui) || ((powershell === true || OUTILS_POWERSHELL.includes(tn)) && lectureRawAffectee(cmd, qui));
     if (sousAgent) {
       // Lecture permise, écriture refusée ; CLI : lecture, ou note sur sa propre fiche.
       const qui = { agentId: chaine(inp.agent_id) };
-      if (touche) return commandeLectureOuCli(cmd, qui) || texte(qui) ? null : RAISON_SOUS_AGENT; // ancre-mutation:lecture-sous-agent
-      if (appelleCli(cmd)) return cliSeuleDuSousAgent(cmd, qui.agentId) || texte(qui) ? null : RAISON_SOUS_AGENT;
+      if (touche) return lecture(qui) || texte(qui) ? null : RAISON_SOUS_AGENT; // ancre-mutation:lecture-sous-agent
+      if (appelleCli(cmd)) return lecture(qui) || cliSeuleDuSousAgent(cmd, qui.agentId) || texte(qui) ? null : RAISON_SOUS_AGENT;
       return null;
     }
     if (!touche) return null;
-    return commandeLectureOuCli(cmd) || texte() ? null : RAISON_SHELL;
+    return lecture() || texte() ? null : RAISON_SHELL;
   }
   if (generique) {
     const brut = JSON.stringify(ti);
@@ -3630,7 +4285,7 @@ module.exports = {
   racine, agentDepuisChemin, projetDepuisCwd, chemins, listerProjets, listerProjetsTous,
   lireLedger, modifierLedger, allouerId, rendreVue, assurerVues,
   rejouerJournal, verifierEtat, assurerIntegrite,
-  racineSecours, journalSecours, avertissementSecours,
+  racineSecours, journalSecours, avertissementSecours, traiterSecoursEnAttente,
   ajouterDemande, ajouterLigne, classerSansTravail, changerEtat, abandonner, trouverProjetDe,
   lireSession, modifierSession, lierSession, projetDeSession, enregistrerMessage, rappelStop,
   secours, contexteEchecMessage, lireLignesDepuis, suiteTranscript,
@@ -3640,7 +4295,7 @@ module.exports = {
   texteConsigneSousAgent, consigneADonner, consigneDansTranscript, texteRepriseSousAgent, texteLectureSeule, compactageDuSousAgent, noterCompactage,
   transcriptDUnSousAgent, idDepuisTranscript,
   extraireMarqueurs, marqueursAjoutes, estFichierPreuve, preuveCommit, preuvesDepuisOutil,
-  appliquerPreuves, reconcilier, reconcilierDansHook, texteCommitNu, texteInsistants, texteDeMachine, nettoyerTemporaires,
+  appliquerPreuves, reconcilier, reconcilierDansHook, texteCommitNu, texteInsistants, texteDeMachine, expediteurMessageAgent, nettoyerTemporaires,
   commitsDeLOutil, commitsDepuisSortie, shasDansSortie, noterCommitsSousAgent, texteCommitsAgents, avertissementsAjout,
   gardeOutil, texteToucheRacine, commandeViseRacine, appelleCli, commandeLectureOuCli, lectureAmbigue,
   commandes, contexteMessage, contexteSession, contexteApresPreuve, composerContexte,

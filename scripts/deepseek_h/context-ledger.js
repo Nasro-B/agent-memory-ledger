@@ -515,8 +515,11 @@ function finDansLigne(ligne) {
 
 // Ce que l'orchestrateur doit lire avant la fin du tour : fins pas encore annoncées (SubagentStop marque une
 // fin sans rien lui dire) et rappel des résultats qui attendent. Le Stop bloquant reste le filet de fin de tour.
-function suiviEnCours(input) {
-  try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
+// force : tout ce qui attend est redit, sans délai (nouveau message de l'utilisateur, démarrage, reprise, liste
+// redonnée après un compactage) : un sous-agent fini ne s'oublie jamais « après un compactage ou après des demandes
+// multiples ».
+function suiviEnCours(input, force) {
+  try { return core.texteSuiviEnCours({ agent: AGENT, sessionId: input.session_id, force: !!force }); } catch (_) { return ''; } // ancre-mutation:suivi-en-cours
 }
 
 // Filet de SubagentStop : réponses finales de sous-agents écrites dans le rollout de l'orchestrateur depuis
@@ -557,7 +560,7 @@ function surSessionStart(input) {
   core.assurerVues(AGENT);
   prendreDrapeau(input.session_id);
   const cmd = core.commandes(SCRIPT, projet, input.session_id);
-  contexte('SessionStart', ajuster(suiviEnCours(input), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id }), REGLE_6BIS, cmd.lister));
+  contexte('SessionStart', ajuster(suiviEnCours(input, true), core.contexteSession({ agent: AGENT, projet, script: SCRIPT, sessionId: input.session_id }), REGLE_6BIS, cmd.lister));
 }
 
 // ---------------------------------------------------------------------------
@@ -656,7 +659,9 @@ function surUserPromptSubmit(input) {
   const debut = prompt.trimStart();
   // Texte soumis par une machine (demande « app-generated » de message suggéré) : noyau.
   const machine = typeof core.texteDeMachine === 'function' && core.texteDeMachine(prompt); // ancre-mutation:machine-codex
-  const humain = !!prompt.trim() && !machine && !PREFIXES_NON_HUMAINS.some(p => debut.startsWith(p));
+  // Message d'un autre agent remis comme un tour de l'utilisateur : jamais un message de l'utilisateur (noyau).
+  const dAgent = typeof core.expediteurMessageAgent === 'function' && !!core.expediteurMessageAgent(prompt);
+  const humain = !!prompt.trim() && !machine && !dAgent && !PREFIXES_NON_HUMAINS.some(p => debut.startsWith(p));
   let enr = null;
   let enAttente = false;
   if (humain) {
@@ -676,9 +681,11 @@ function surUserPromptSubmit(input) {
   try { rattraperFins(input); } catch (_) { /* rappelé en fin de tour */ }
   let r = vide();
   try { r = reconcilier(); } catch (_) { /* rien */ }
-  const fins = suiviEnCours(input); // après les preuves : un résultat prouvé traité n'est plus annoncé
-  core.assurerVues(AGENT);
+  // Nouveau message de l'utilisateur, ou liste redonnée après un compactage : les sous-agents finis dont le résultat
+  // attend sont redits en entier, à chaque fois.
   const drapeau = prendreDrapeau(input.session_id);
+  const fins = suiviEnCours(input, humain || drapeau); // ancre-mutation:rappel-force-codex
+  core.assurerVues(AGENT);
   const projet = enr ? enr.projet : core.projetDeSession(AGENT, input.session_id, input.cwd);
   const cmd = core.commandes(SCRIPT, projet, input.session_id);
   const haut = [drapeau ? APRES_COMPACTAGE : '', ligneResultat(r), fins,
@@ -703,9 +710,9 @@ function surPostToolUse(input) {
   try { ajouterResultat(total, reconcilier()); } catch (_) { /* rien */ }
   try { ajouterResultat(total, preuvesCommit(input)); } catch (_) { /* rien */ }
   // après les preuves : un résultat prouvé traité n'est plus annoncé ; le commit sans mention est dit tout de suite
-  const fins = [rappelCommitNu(input, total), suiviEnCours(input)].filter(Boolean).join('\n'); // ancre-mutation:rappel-commit-nu-codex
+  const drapeau = prendreDrapeau(input.session_id); // liste redonnée après un compactage : rappel complet des sous-agents finis
+  const fins = [rappelCommitNu(input, total), suiviEnCours(input, drapeau)].filter(Boolean).join('\n'); // ancre-mutation:rappel-commit-nu-codex
   core.assurerVues(AGENT);
-  const drapeau = prendreDrapeau(input.session_id);
   if (!drapeau && !a_change(total)) { // liste renvoyée seulement si elle a changé
     contexte('PostToolUse', fins);
     return;
