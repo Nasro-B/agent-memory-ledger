@@ -1,7 +1,7 @@
 // consignes-logique.mjs : logique pure des Consignes en vigueur (les ordres permanents de l'utilisateur, rappelés à chaque requête,
 // et le refus des commandes et des agents que le code sait reconnaître).
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code (copie identique,
-// vérifiée par un test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus, sans avertissement).
+// vérifiée par un test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 // État : { prochain, consignes: [{ id, texte, actif, verrou }] }. Par défaut : aucune consigne, donc inerte (rien à rappeler,
 // rien à refuser), exactement comme avant les Consignes.
 //

@@ -99,7 +99,7 @@ const MUTATIONS = [
   { nom: 'cm-cmd-message-perdu', f: R, de: 'return { text: analyse.message }', vers: "return { text: '' }" },
   // réglages du Cockpit (jetons {worktrees} et {plans}) : config.json, sinon les défauts. `valeursJetons` normalise elle-même ses entrées.
   { nom: 'cm-valeurs-chemin-faux', f: R, de: "const NOM_CONFIG = 'config.json'", vers: "const NOM_CONFIG = 'config2.json'" },
-  { nom: 'cm-valeurs-bom-non-retire', f: R, de: LIRE_BOM_CONFIG, vers: 'JSON.parse(await $.fs.read(CONFIG))' },
+  { nom: 'cm-valeurs-bom-non-retire', f: R, de: LIRE_BOM_CONFIG, vers: 'JSON.parse(await $.fs.read(await cheminConfig($)))' },
   { nom: 'cm-valeurs-abime-vide', f: R, de: '  } catch {\n    return valeursJetons(null)\n  }', vers: "  } catch {\n    return { worktrees: '', plans: '' }\n  }" },
   { nom: 'cm-valeurs-abime-config-ignoree', f: R, de: `return valeursJetons(${LIRE_BOM_CONFIG})`, vers: 'return valeursJetons(null)' },
   // dossier d'état (emplacements-logique.mjs) : les deux fichiers sont dans le dossier du Cockpit, et un dossier introuvable est dit

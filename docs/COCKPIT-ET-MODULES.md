@@ -43,7 +43,7 @@ Il mesure l'état réel du travail et le rend en une ligne (`ligneCockpit`) ou e
 La ligne ne dit que ce qui a quelque chose à dire : une politique inerte, une nuit finie sans question en boîte ou des sessions sans pause n'y figurent pas. Exemple, avec des noms inventés :
 
 ```
-Cockpit | ledger 2 ouvertes, 1 bloquée, 1 à trier | agents 1 en cours, 1 échoué | APP propre, = main, = distant | API 3 modif, +2 main, +2 distant | plans 50 % (2/4) | quota claude 7 j 71 % consommes, 29 % restants (source, 10:42)
+Cockpit | ledger 2 ouvertes, 1 bloquée, 1 à trier | agents 1 en cours, 1 échoué | APP propre, = main, = distant | API 3 modif, +2 main, +2 distant | plans 50 % (2/4) | quota claude 7 j 71 % consommés, 29 % restants (source, 10:42)
 ```
 
 ### Emplacements et fichiers d'état
@@ -54,7 +54,7 @@ Le dossier d'état du Cockpit est `COCKPIT_DIR`, sinon `<maison>/cockpit`, où l
 | --- | --- | --- |
 | `config.json` | les réglages : worktrees mesurés, dossier des plans (absent ou mal formé : valeurs par défaut, champ par champ) | `cockpit.js config` |
 | `git-etat.json`, `git-etat.verrou` | la dernière mesure git, et le verrou d'un rafraîchissement en cours (jamais deux ensemble ; un verrou périmé ou d'un processus mort est repris) | `cockpit.js rafraichir-git` |
-| `quota-<agent>.json` | la dernière mesure de quota d'un agent | le noyau du quota (`mesurerCodex` depuis le rollout de Codex, `rafraichirNatif` depuis son serveur d'application) ; la mesure de Claude Code sera écrite par son adaptateur (`ecrireQuota` du noyau du Cockpit, sans appelant d'ici là) |
+| `quota-<agent>.json` | la dernière mesure de quota d'un agent | le noyau du quota (`mesurerCodex` depuis le rollout de Codex, `rafraichirNatif` depuis son serveur d'application) ; la mesure de Claude Code est écrite par le module d'interface `garde-quota` (`quota-claude.json`) |
 | `modeles-agents.json` | les règles de modèle des sous-agents | `cockpit.js config modeles` |
 | `inj-<agent>-<session>.json`, `inj-<agent>-<session>.compacte` | l'état de la dernière injection du bloc dans un fil (empreinte, heure, consignes, quota) et la marque d'un compactage en attente de réinjection ; le nom de la session est assaini (lettres, chiffres, `_` et `-`, 64 caractères au plus) | le hook `scripts/codex/cockpit.js` (ceux de plus de trois jours sont supprimés au démarrage d'une session) |
 | `politique-agents.json`, `file-agents.json`, `reservations-agents.json`, `consignes.json`, `garde-quota.json`, `nuit.json`, `nuit-boite.json`, `pause.json` et leurs fichiers voisins | l'état des autres modules (voir « Les noyaux des modules ») | leurs noyaux ; le Cockpit ne fait que les lire |
@@ -88,7 +88,7 @@ Les opérations de `nuit-hook` sont `question`, `garde`, `continuer`, `activite`
 
 ## Les noyaux des modules
 
-Chaque noyau lit l'état de son module, appelle la logique pure, et n'écrit que si l'état change, dans le dossier d'état du Cockpit, de façon atomique. Les hooks de Codex (voir plus bas) appellent ceux du Cockpit, du Régulateur, du Garde-quota, des Consignes et de la Nuit ; aucun hook n'appelle encore celui de la Pause.
+Chaque noyau lit l'état de son module, appelle la logique pure, et n'écrit que si l'état change, dans le dossier d'état du Cockpit, de façon atomique. Les hooks de Codex (voir plus bas) appellent ceux du Cockpit, du Régulateur, du Garde-quota, des Consignes et de la Nuit ; celui de la Pause n'a pas de hook de Codex : c'est le module d'interface `pause` de Claude Code qui l'appelle (`pause-hook`).
 
 | Module | Noyau | Fichiers d'état | Ce qu'il fait |
 | --- | --- | --- | --- |
@@ -103,8 +103,6 @@ Chaque noyau lit l'état de son module, appelle la logique pure, et n'écrit que
 **La garde interrogée par la Nuit.** Pour une commande, la Nuit lance elle-même la garde de sécurité (`scripts/gardes/securite.js`, avec `--agent` suivi du nom de l'agent du dépôt) et lit sa sortie : un refus (`deny`) devient un refus de la Nuit avec une alternative, une demande d'accord (`ask`, que seule la garde de Claude Code rend) devient une entrée de la boîte avec les boutons « Autoriser » et « Refuser ». Les autres agents reçoivent un refus quand la garde ne trouve pas d'ordre de l'utilisateur : leur poussée n'entre donc pas dans la boîte. La commande est lue dans `command`, `cmd`, `script` ou `input` ; une commande donnée en tableau n'est pas soumise à la garde par la Nuit (la garde elle-même la lit). `NUIT_GARDE` (un autre script de garde), `NUIT_GARDE_DELAI_MS` et `NUIT_VERROU_DELAI_MS` ne servent qu'aux bancs.
 
 **Noms d'agents.** La file du Régulateur, la boîte de la Nuit et les fichiers `quota-<agent>.json` n'acceptent que des clés : minuscules, chiffres et tirets, une lettre en tête, 32 caractères au plus. `scripts/lib/agents-noms.js` est l'unique endroit qui convertit : `cleAgent('deepseek_H')` rend `deepseek-h` ; `nomsListe` rend les noms sous lesquels la liste de travail connaît cet agent (la clé et le nom du dépôt). Chaque noyau convertit à l'entrée de ses fonctions ; un nom qui n'est ni un agent du dépôt ni déjà une clé reste refusé (`Claude`, `deepseek_h`, `../x`).
-
-
 
 ## Brancher dans Codex
 
@@ -178,9 +176,9 @@ node tests/mutations/mutations-nuit-core.js          # mutations du noyau de la 
 node tests/mutations/mutations-regulateur-codex.js   # mutations du hook de Codex du Régulateur ; mutations-cockpit-codex.js, -consignes-codex.js, -nuit-codex.js, -cockpit-brancher.js, -installateur-cockpit.js, -regulateur-file.js, -synchroniser-mods.js et -reglages-codex.js pour les autres
 ```
 
-## Notes pour qui branchera ces modules
+## Notes pour qui modifie ou branche ces modules
 
-- **Fichiers `.mjs`.** Chaque logique est un module ES sans aucun import. Les noyaux et les bancs la chargent par `require()` (Node 22.12 ou plus, sans avertissement). Un banc lit le fichier désigné par une variable d'environnement interne (par exemple `QUOTA_LOGIQUE_TESTE`, `COCKPIT_CORE_TESTE` et `COCKPIT_CLI_TESTE` pour le Cockpit et sa ligne de commande, `NUIT_CORE_TESTE` pour le noyau de la Nuit) : c'est ainsi que les scripts de mutation lui donnent une copie altérée. Ne jamais la poser ailleurs.
+- **Fichiers `.mjs`.** Chaque logique est un module ES sans aucun import. Les noyaux et les bancs la chargent par `require()` (Node 22.12 ou plus ; sans avertissement depuis la 22.13). Un banc lit le fichier désigné par une variable d'environnement interne (par exemple `QUOTA_LOGIQUE_TESTE`, `COCKPIT_CORE_TESTE` et `COCKPIT_CLI_TESTE` pour le Cockpit et sa ligne de commande, `NUIT_CORE_TESTE` pour le noyau de la Nuit) : c'est ainsi que les scripts de mutation lui donnent une copie altérée. Ne jamais la poser ailleurs.
 - **Noms d'agents.** La file d'attente et la boîte de la Nuit n'acceptent que des noms en minuscules, chiffres et tirets (au plus 32 caractères, commençant par une lettre), et les fichiers `quota-<agent>.json` aussi. Les noms d'agents que connaît `scripts/lib/config.js` (par exemple `deepseek_H`) sont convertis par `scripts/lib/agents-noms.js` avant d'entrer dans ces états (voir « Les noyaux des modules »). Le Cockpit, lui, lit les listes de travail de tous les agents du dépôt, majuscules et tirets bas compris. Sans mesure de quota, il attend celles de `claude` et de `codex`.
 - **Forme des lignes d'agents.** Le Cockpit reconnaît les sous-agents aux lignes que le noyau de la liste de travail écrit (`scripts/lib/context-ledger-core.js`) : le texte `[agent] « titre » (genre, identifiant) : ...` et les notes `agent en cours depuis ...`, `agent relancé depuis ...` et `TERMINÉ (statut) le ... : ...`. Un banc lance ce noyau pour s'en assurer. Si ces formes changent, le noyau du Cockpit et ce banc changent avec elles.
 - **Messages.** Les textes que ces modules rendent au modèle sont en français et ne contiennent jamais de tiret cadratin, ce que les bancs vérifient. Ils nomment « l'utilisateur » : aucune identité n'y est écrite.
@@ -189,12 +187,11 @@ node tests/mutations/mutations-regulateur-codex.js   # mutations du hook de Code
 - **Enchaînement de la Nuit et liste de travail.** Le texte que la Nuit soumet au modèle pour enchaîner (« NUIT : L'utilisateur est absent. Continue sans l'attendre ... ») revient à l'adaptateur comme un message de l'utilisateur : `texteDeMachine` (dans `scripts/lib/context-ledger-core.js`) le reconnaît à son début exact, et il ne reçoit donc pas de numéro de message. Une réponse de la boîte commence par le même préfixe « NUIT : » mais porte une décision de l'utilisateur : elle reçoit un numéro.
 - **Fuseau horaire.** L'heure de la mesure de quota, dans la ligne, est celle de la machine.
 - **Dépôts suivis.** Un dépôt qui n'a pas de branche `main` locale ou de distant est dit tel quel (`sans distant`, `? main`), jamais deviné. Le Cockpit ne lance que des commandes git en lecture, avec `--no-optional-locks`.
-
 - **Hooks de Codex.** Chaque hook lit ce que la ligne de commande écrit (voir « Brancher dans Codex »). Le hook du Cockpit ne branche pas `PostToolUse` avec le composant `cockpit` : c'est le composant `cockpit-outils`, à part parce qu'il lance un processus après chaque outil de Codex. De même, le résultat d'un lancement d'agent (composant `regulateur-resultat`) est ce qui retire une demande lancée de la file : branchez-le avec `regulateur` et `file`, `node scripts/installer-codex.js --cockpit` les branche tous.
 - **Deux hooks `Stop`.** `file` et `nuit-tours` répondent chacun à `Stop` par une demande de continuer (`{"decision":"block","reason":...}`) ; avec les deux branchés, Codex reçoit deux réponses. Chacun ne parle que dans son cas (une file avec un créneau libre, une nuit avec une ligne ouverte) et une seule fois par message, mais la façon dont Codex combine deux réponses de ce genre n'a pas été observée.
-- **Pas de hook pour la Pause.** Les hooks de Codex couvrent le Cockpit, le Régulateur et sa file, les Consignes, la Nuit et, à travers eux, le Garde-quota. La pause (`cockpit.js pause`, `pause-hook`) n'a pas de hook de Codex : elle est prévue pour Claude Code.
+- **Pas de hook pour la Pause.** Les hooks de Codex couvrent le Cockpit, le Régulateur et sa file, les Consignes, la Nuit et, à travers eux, le Garde-quota. La pause (`cockpit.js pause`, `pause-hook`) n'a pas de hook de Codex : dans Claude Code, c'est le module d'interface `pause` qui la branche.
 - **Agents.** `--agent` accepte `codex`, `deepseek_H` et toute clé d'état valide ; les noms libres de la forme `Claude` ou `deepseek_h` sont refusés. La lecture native du quota ne vaut que pour `codex`.
 
-## Ce qui vient ensuite
+## Où en est le dépôt
 
-Les modules d'interface de Claude Code (`mods/`) sont dans le dépôt, câblés de bout en bout : logique, noyau, commande, module, réglage, avec les bancs du moteur et les mutations qui les prouvent. Pour Codex, c'est fait pour le Cockpit, le Régulateur, les Consignes et la Nuit. Ce qui n'a pas été observé (aucun hook de Codex n'a été chargé par un vrai Codex depuis ce dépôt, aucun module n'a été chargé dans une vraie session de Claude Code depuis ce dépôt) est dit dans le README et dans `docs/MODULES-INTERFACE.md`.
+Chaque module est câblé de bout en bout : logique, noyau, commande, branchement dans l'agent et réglage, avec les bancs et les mutations qui le prouvent. Pour Claude Code, par les six modules d'interface de `mods/`. Pour Codex, par les hooks du Cockpit, du Régulateur, des Consignes et de la Nuit ; la Pause n'a pas de hook de Codex. Ce qui n'a pas été observé (aucun hook de Codex n'a été chargé par un vrai Codex depuis ce dépôt, aucun module n'a été chargé dans une vraie session de Claude Code depuis ce dépôt) est dit dans le README et dans `docs/MODULES-INTERFACE.md`.

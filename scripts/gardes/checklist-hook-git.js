@@ -5,7 +5,7 @@
 // Les hooks d'agents peuvent laisser passer une commande (délai dépassé, outil non couvert, autre shell) ; celui-ci
 // non.
 //
-// Installation dans un dépôt (voir le README, section « Gardes ») : un fichier `.githooks/pre-commit` qui contient
+// Installation dans un dépôt (voir docs/GARDES.md, « Rappel avant commit ») : un fichier `.githooks/pre-commit` qui contient
 //
 //   #!/bin/sh
 //   node "<dossier du plugin>/scripts/gardes/checklist-hook-git.js" || exit 1

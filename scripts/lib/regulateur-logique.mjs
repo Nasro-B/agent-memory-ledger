@@ -1,6 +1,6 @@
 // regulateur-logique.mjs : logique pure du Régulateur d'agents (plafond d'agents en parallèle, pause, rappel).
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code (copie identique,
-// vérifiée par un test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus, sans avertissement).
+// vérifiée par un test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 // Politique : { max: 1..50 ou null (libre), pause: bool, relance: bool, file: bool }. Par défaut : inerte (max null, pas de pause,
 // pas de relance, pas de file) : la décision autorise tout et le rappel est vide, exactement comme avant le Régulateur.
 // file : un agent refusé par le maximum est mis en file (file-logique.mjs) au lieu d'être simplement refusé ; le suivant est lancé

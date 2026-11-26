@@ -1,7 +1,7 @@
 // config-logique.mjs : logique pure des réglages du Cockpit (les worktrees mesurés et le dossier des plans) et de la commande qui les
 // change (`cockpit.js config ...`, `/cockpit config ...`). Source unique des valeurs par défaut.
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code et au module des Consignes (copie identique, vérifiée
-// par un test) et chargé par require() dans le noyau du Cockpit et les hooks Codex (Node 22.12 ou plus, sans avertissement).
+// par un test) et chargé par require() dans le noyau du Cockpit et les hooks Codex (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 // Les vérifications qui touchent le disque (le dossier existe, c'est un dépôt git) sont fournies par l'appelant (`verif`) : sans elles,
 // la commande ne vérifie rien.
 // Réglages : { worktrees: [{ nom, chemin }], plans: { dossier, exclure: [nom], profondeur } }.

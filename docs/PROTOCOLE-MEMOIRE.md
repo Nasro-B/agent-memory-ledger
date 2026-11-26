@@ -93,3 +93,8 @@ Format, identique pour tous :
 | Après compactage | `context-ledger.js` | note le compactage d'un sous-agent ; Codex : programme la réinjection de la liste |
 | Après compactage | `memoire/rappel.js` | réinjecte les 6 dernières heures, sans les entrées automatiques |
 | Fin de session | `memoire/fin-session.js` | entrée « wip » si du travail n'est pas commité |
+| Avant un outil de shell | `gardes/securite.js` | garde de sécurité : refuse les commandes destructrices, demande confirmation pour une poussée ou un déploiement de production, applique le rappel avant commit |
+| Avant une écriture ou une commande | `gardes/caracteres.js` | garde des caractères : refuse un texte écrit qui contient un caractère invisible |
+| Fin de tour | `gardes/caracteres.js --stop` | demande une réponse corrigée si la dernière contient un caractère invisible |
+
+Les trois dernières lignes sont les gardes, actives par défaut et réglables : voir [GARDES.md](GARDES.md). Les outils couverts et les délais de chaque hook, par agent, sont dans le [README](../README.md#ce-que-font-les-hooks). Les hooks de Codex du Cockpit et les modules d'interface de Claude Code ne figurent pas ici : ils sont facultatifs et ne se branchent qu'à la demande ([COCKPIT-ET-MODULES.md](COCKPIT-ET-MODULES.md), [MODULES-INTERFACE.md](MODULES-INTERFACE.md)).

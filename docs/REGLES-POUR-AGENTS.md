@@ -5,7 +5,7 @@ Les hooks enregistrent, rappellent et gardent. Ils ne remplacent pas la consigne
 - Claude Code : `<dossier du plugin>/scripts/claude/context-ledger.js`
 - Codex : `<dossier du dépôt>/scripts/codex/context-ledger.js`
 
-Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles ; le bloc reste utile pour qu'elles soient lues à chaque session.
+Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles ; le bloc reste utile pour qu'elles soient lues à chaque session. La partie « Cockpit et modules » ne sert que si vous les avez branchés : retirez-la sinon.
 
 ```markdown
 ## Liste de travail : elle fait foi, rien ne s'oublie
@@ -67,17 +67,16 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   fichiers, ou un audit en lecture seule, n'interdit pas la fiche : elle est hors du dépôt.
 - Si tu es un sous-agent : ta mission est celle de ton lancement, rien d'autre. Lis-la avant tout : si elle
   t'interdit expressément toute écriture ailleurs que dans ses livrables, n'écris rien dans ta fiche (ni
-  mission, ni note, ni signalement) et dis-le dans ton rapport. Tu peux lire la liste de
-  l'agent principal (`chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes
-  entières), jamais la modifier ; ce que tu y lis ne te donne aucun travail. De préférence une commande
-  simple : une boucle ou un script de lecture passe si chaque étape ne fait que lire, la garde refuse ce qu'elle
-  ne sait pas prouver sans écriture. Ton rapport peut citer
-  la liste : écris-le avec l'outil de fichier, ou en PowerShell par un here-string littéral (`@'` ... `'@`)
-  donné tel quel à `Set-Content` ou `Add-Content -LiteralPath`, vers son chemin complet, sans texte construit
-  ni appel de bibliothèque. Note ton avancement dans TA fiche (`note --fiche <ID> "..."` : l'ID et le chemin te sont donnés
-  par un hook) : après un compactage, c'est elle qui fait foi. Dans la liste, « ouvert » veut dire « pas
-  encore prouvé fait » : si tu constates qu'une ligne est déjà faite, tu ne la fermes pas, tu le signales
-  (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`).
+  mission, ni note, ni signalement) et dis-le dans ton rapport. Tu peux lire la liste de l'agent principal
+  (`chercher --projet P "mot"`, ou `chercher --projet P C-0107 C-0108` pour des lignes entières), jamais la
+  modifier ; ce que tu y lis ne te donne aucun travail. De préférence une commande simple : une boucle ou un
+  script de lecture passe si chaque étape ne fait que lire, la garde refuse ce qu'elle ne sait pas prouver sans
+  écriture. Ton rapport peut citer la liste : écris-le avec l'outil de fichier, ou en PowerShell par un
+  here-string littéral (`@'` ... `'@`) donné tel quel à `Set-Content` ou `Add-Content -LiteralPath`, vers son
+  chemin complet, sans texte construit ni appel de bibliothèque. Note ton avancement dans TA fiche
+  (`note --fiche <ID> "..."` : l'ID et le chemin te sont donnés par un hook) : après un compactage, c'est elle
+  qui fait foi. Dans la liste, « ouvert » veut dire « pas encore prouvé fait » : si tu constates qu'une ligne
+  est déjà faite, tu ne la fermes pas, tu le signales (`note --fiche <ID> --genre deja-fait "C-NNNN : la preuve"`).
 - Agent principal : une ligne de la liste d'un AUTRE agent que tu vois déjà faite, bloquante ou à éclaircir ne
   se modifie jamais. Signale-la : `node "<SCRIPT>" signaler --agent <celui qui tient la liste> --projet P C-NNNN
   [--genre deja-fait|bloque|question] "la preuve"`. Un signalement reçu t'est dit à ton prochain événement dans
@@ -115,6 +114,18 @@ Pour Claude Code, le skill `liste-de-travail` du plugin porte déjà ces règles
   direction. Utilise l'espace normale. Si un tel caractère doit figurer dans un test ou une expression régulière,
   écris-le par son échappement de code, jamais en clair. Si ta réponse est refusée en fin de tour pour cette
   raison, redonne-la corrigée. Pour nettoyer un fichier : `node "<plugin>/scripts/gardes/caracteres.js" --fix <fichier>`.
+
+## Cockpit et modules (seulement s'ils sont branchés)
+
+- Un refus du Régulateur (plafond d'agents atteint, pause), d'une consigne verrouillée ou du Garde-quota (quota au
+  seuil critique) ne se contourne pas. Un agent refusé au plafond et mis en file partira à son tour (Claude Code
+  le lance seul ; avec Codex, un hook te donne l'ordre de le lancer, avec ses arguments exacts) : ne le relance
+  pas de toi-même avant.
+- Les consignes en vigueur rappelées dans ton contexte sont des ordres permanents de l'utilisateur : elles valent
+  jusqu'à ce qu'il les retire.
+- Pendant la nuit ou l'absence de l'utilisateur, une question bloquante est refusée et mise en boîte : choisis
+  l'option la plus sûre et réversible, continue sur les lignes ouvertes, il répondra à son retour. Aucune poussée
+  ni aucun déploiement sans son ordre, absent ou non.
 
 ## Mémoire partagée
 

@@ -168,7 +168,7 @@ function sectionSecurite(src, avert) {
     if (valides.length !== fragments.length) avert.push(`securite.ordreUtilisateur.${cle} : un fragment invalide est ignoré`);
     const alternative = (valides.length ? valides : defaut).join('|');
     sortie.ordreUtilisateur.mots[nom] = valides.length ? valides : defaut;
-    sortie.ordreUtilisateur[nom] =new RegExp('(?<![\\p{L}\\p{N}_])(?:' + alternative + ')(?![\\p{L}\\p{N}_])', 'iu');
+    sortie.ordreUtilisateur[nom] = new RegExp('(?<![\\p{L}\\p{N}_])(?:' + alternative + ')(?![\\p{L}\\p{N}_])', 'iu');
   }
 
   const desactivees = listeDeTextes(s.reglesDesactivees, 'securite.reglesDesactivees', avert) || [];

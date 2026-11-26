@@ -1,7 +1,7 @@
 // file-logique.mjs : logique pure de la file d'agents du Régulateur (un agent refusé par le plafond attend son tour, le suivant est
 // lancé dès qu'un créneau se libère, un agent échoué est relancé deux fois au plus).
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code (copie identique, vérifiée par un
-// test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus, sans avertissement).
+// test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 //
 // État : { prochain, entrees: [{ id, agent, session, ajoute, description, demande, essais, statut, ordre }], relances: { clé: 1 à 2 } }.
 //   agent    claude, codex ou un autre agent (nom en minuscules, chiffres et tirets) : la file est PAR agent et PAR session (seule la session qui a demandé l'agent le lance).

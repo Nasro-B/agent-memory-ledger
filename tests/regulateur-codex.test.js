@@ -568,13 +568,13 @@ describe('Stop : ordre de lancer le suivant, ordre de relancer les échoués', (
   });
 
   test('la clé de relance garde les huit premiers caractères du fil : deux fils proches ne partagent pas leur compteur', () => {
-    const fil = '01a0f9c2-ee5a-78c2-8f76-422e0199aea6';
+    const fil = '01b2c3d4-0000-7000-8000-0000000000a1';
     ecrireEtatLedger('codex', 'P1', { 'C-0001': agentEchoue('Audit', il_y_a(30 * MIN), fil) });
     politiqueFile(3, ['relance on']);
     assert.match(ordre(lancer(stop({ session_id: fil }))).reason, /\(relance 1 sur 2\)/);
-    assert.equal(regulateur.relancesFaites('codex:01a0f9c2:Audit'), 1);
+    assert.equal(regulateur.relancesFaites('codex:01b2c3d4:Audit'), 1);
     assert.equal(regulateur.relancesFaites(`codex:${fil}:Audit`), 0);
-    assert.equal(regulateur.relancesFaites('codex:01a0f9c:Audit'), 0);
+    assert.equal(regulateur.relancesFaites('codex:01b2c3d:Audit'), 0);
   });
 
   test('un échoué de 90 minutes est relancé, un échoué de plus de deux heures ne l est pas', () => {

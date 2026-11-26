@@ -55,6 +55,7 @@ Décision déjà prise par l'utilisateur : ...
 - Pas d'action sur un système réel (migration appliquée, variable posée, tâche planifiée activée) : tu écris les fichiers, l'orchestrateur applique.
 - Tu ne modifies pas la liste de travail (fichier contexte) : pas de `ajouter`, `etat`, `sans-travail` ni `abandon`. Tu rends ton résultat, l'orchestrateur la met à jour (section 2 bis : ce qui t'est ouvert).
 - Commit avec la liste explicite de tes seuls fichiers. Ton commit ne ferme aucune ligne de l'orchestrateur, même si son message porte `[ctx C-NNNN]` : l'orchestrateur en est prévenu, lit ton diff, vérifie, puis cite lui-même la mention. Écris dans ton rapport quelles lignes ton commit termine.
+- Si une garde est active dans le dépôt (rappel avant commit, sécurité des commandes) : écris ton rapport AVANT de commiter ; prépare l'index, lance SEULE la commande de confirmation que le refus donne, puis le commit dans une commande SÉPARÉE, avec son message dans un fichier (`git commit -F`). N'écris jamais en clair, dans une commande, une note ou un message de commit, ce qu'une garde refuse (une commande destructrice citée en exemple, l'option qui saute les vérifications de git) : décris-le en mots. Constat d'origine : un sous-agent dont une commande est refusée par une garde peut voir sa session arrêtée sans avoir rendu son rapport.
 
 ## 6. Fin et rapport
 

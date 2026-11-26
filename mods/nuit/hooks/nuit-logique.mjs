@@ -2,7 +2,7 @@
 // les arrêts de garde deviennent des refus avec alternative, le travail continue sur les lignes ouvertes de la liste de travail, et un récap
 // l'attend au réveil).
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code (copie identique, vérifiée par un
-// test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus, sans avertissement).
+// test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 //
 // État (COCKPIT_DIR/nuit.json, relu tel quel par le Cockpit) :
 //   actif, mode (nuit : /nuit on ; absence : l'utilisateur n'a rien écrit depuis absenceMinutes), depuis, fin,

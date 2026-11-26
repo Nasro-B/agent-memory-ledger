@@ -2,7 +2,7 @@
 // consigne au modèle, remise à zéro, commande /quota). Les fenêtres sont celles que le moteur rapporte : 7 j seule quand le moteur ne rapporte pas
 // de session de 5 h, 5 h et 7 j chez Codex ; rien ici ne suppose l'une d'elles.
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code (copie identique,
-// vérifiée par un test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus, sans avertissement).
+// vérifiée par un test) et chargé par require() dans les hooks Codex (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 // Une fenêtre : { nom: '5 h' | '7 j' | 'budget' | autre, pct: nombre ou null, resetsAt?: date ISO }.
 // Les fonctions qui prennent une configuration la veulent NORMALISÉE (normaliserConfig) ; le reste est tolérant.
 

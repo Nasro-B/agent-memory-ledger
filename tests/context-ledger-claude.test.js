@@ -2545,14 +2545,14 @@ test('signalement entre agents principaux : déposé par signaler, dit une fois 
 
 test('transcript d\'un sous-agent : jamais lu avec l\'octet déjà vu de l\'orchestrateur (Claude : dossier subagents ; Codex : autre fil)', () => {
   const dir = dossier('transcript-sous-agent');
-  const S = '01a0f9c2-ee5a-78c2-8f76-422e0199aea6';
+  const S = '01b2c3d4-0000-7000-8000-0000000000a1';
   const d = path.join(RUN, 'transcript-sous-agent-fichiers');
   fs.mkdirSync(path.join(d, S, 'subagents'), { recursive: true });
   const ligne = JSON.stringify({ type: 'user', message: { content: 'x' } }) + '\n';
   const racineClaude = path.join(d, `${S}.jsonl`);
   const enfantClaude = path.join(d, S, 'subagents', 'agent-a1.jsonl');
-  const racineCodex = path.join(d, `rollout-2026-10-02T00-18-16-${S}.jsonl`);
-  const enfantCodex = path.join(d, 'rollout-2026-10-02T00-33-32-01a0f9d0-e693-7861-bb33-434fd1182af0.jsonl');
+  const racineCodex = path.join(d, `rollout-2026-03-02T00-18-16-${S}.jsonl`);
+  const enfantCodex = path.join(d, 'rollout-2026-03-02T00-33-32-01b2c3e5-0000-7000-8000-0000000000b2.jsonl');
   for (const f of [racineClaude, enfantClaude, racineCodex, enfantCodex]) fs.writeFileSync(f, ligne);
   const suite = (agent, fichier) => avecRacine(dir, () => core.suiteTranscript({ agent, sessionId: S, fichier, surLigne: () => {} }));
   assert.deepEqual(suite('claude', racineClaude), { vu: ligne.length, base: true });

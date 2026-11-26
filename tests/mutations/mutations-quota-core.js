@@ -95,7 +95,6 @@ const MUTATIONS = [
   { nom: 'qcore-rollout-limite-absente', suite: 'lecture native', de: "(!r.limit_id || r.limit_id === 'codex')", vers: "(r.limit_id === 'codex')" },
 ];
 
-
 executer({
   source: path.join(LIB, 'quota-core.js'),
   banc: path.join(__dirname, '..', 'quota-core.test.js'),

@@ -433,7 +433,7 @@ describe('quota de Codex (Garde-quota)', () => {
 
   test('la nouvelle mesure du Cockpit est injectee sans attendre dix minutes', () => {
     contexteDe(lancer(prompt({ transcript_path: rollout(tokenCount(50)) })));
-    assert.match(contexte(lancer(prompt({ transcript_path: rollout(tokenCount(55)) }))), /55 % consommes, 45 % restants/);
+    assert.match(contexte(lancer(prompt({ transcript_path: rollout(tokenCount(55)) }))), /55 % consommés, 45 % restants/);
     assert.equal(require(path.join(__dirname, '..', 'scripts', 'lib', 'cockpit-core.js')).lireQuota('codex').fenetres[0].pct, 55);
   });
 

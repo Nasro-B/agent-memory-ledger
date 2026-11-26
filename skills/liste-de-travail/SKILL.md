@@ -1,6 +1,6 @@
 ---
 name: liste-de-travail
-description: Règles de la liste de travail tenue par agent-memory-ledger. À utiliser dès qu'un hook injecte « Fichier contexte », un message M-NNNN à trier, une ligne C-NNNN, un rappel de sous-agent terminé ou un signalement de sous-agent, quand tu es toi-même un sous-agent qui reçoit sa fiche,, quand une garde du plugin refuse une commande, un commit ou une écriture (sécurité, rappel avant commit, caractères invisibles), et avant de répondre « c'est fini » ou « il ne reste que ».
+description: Règles de la liste de travail tenue par agent-memory-ledger. À utiliser dès qu'un hook injecte « Fichier contexte », un message M-NNNN à trier, une ligne C-NNNN, un rappel de sous-agent terminé ou un signalement de sous-agent, quand tu es toi-même un sous-agent qui reçoit sa fiche, quand une garde du plugin refuse une commande, un commit ou une écriture (sécurité, rappel avant commit, caractères invisibles), et avant de répondre « c'est fini » ou « il ne reste que ».
 ---
 
 # Liste de travail (fichier contexte)
@@ -63,3 +63,11 @@ Le plugin apporte aussi trois gardes (sécurité des commandes, rappel avant com
 - **Ne contourne jamais un refus** (autre forme de la même commande, autre outil, script intermédiaire). Corrige la cause, ou explique le risque à l'utilisateur et attends son ordre. Une poussée ou un déploiement de production n'est lancé que sur son ordre (Claude Code : il tranche à la demande ; Codex : refusé sauf s'il vient de l'ordonner dans son message du tour ; un sous-agent ne pousse ni ne déploie jamais).
 - **Rappel avant commit.** Le refus nomme les catégories sensibles du diff préparé (migrations, fonctions déployées à part, variables d'environnement, tâches planifiées). Vérifie RÉELLEMENT chaque point, puis lance SEULE la commande de confirmation que le refus donne (`--<catégorie>=oui|na`), puis le même commit dans une commande SÉPARÉE. `non` ne débloque rien. Toute modification de l'index rend la confirmation caduque.
 - **Caractères invisibles.** Écris l'espace normale. Un caractère interdit qui doit figurer dans un test s'écrit par son échappement de code, jamais en clair. Une réponse refusée en fin de tour se redonne corrigée.
+
+## Si le Cockpit et ses modules sont branchés
+
+Ils sont facultatifs : sans eux, rien de ce qui suit ne t'arrive.
+
+- **Un refus du Régulateur, d'une consigne ou du Garde-quota ne se contourne pas** (plafond d'agents atteint, pause, commande verrouillée par une consigne, quota au seuil critique). Un agent refusé au plafond et mis en file partira à son tour (Claude Code le lance seul ; avec Codex, un hook te donne l'ordre de le lancer, avec ses arguments exacts) : ne le relance pas de toi-même avant.
+- **Les consignes en vigueur** rappelées dans ton contexte sont des ordres permanents de l'utilisateur : elles valent jusqu'à ce qu'il les retire.
+- **Pendant la nuit ou l'absence de l'utilisateur**, une question bloquante est refusée et mise en boîte : choisis l'option la plus sûre et réversible, continue sur les lignes ouvertes, il répondra à son retour. Aucune poussée ni aucun déploiement sans son ordre, absent ou non.

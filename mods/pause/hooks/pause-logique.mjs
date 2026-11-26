@@ -1,6 +1,6 @@
 // pause-logique.mjs : logique pure de la Pause (suspendre une session ou un agent sans le tuer, puis le reprendre).
 // Aucun import, aucune entrée-sortie : le MÊME fichier est destiné à l'adaptateur Claude Code (copie identique, vérifiée par un
-// test) et chargé par require() dans le noyau du Cockpit (Node 22.12 ou plus, sans avertissement).
+// test) et chargé par require() dans le noyau du Cockpit (Node 22.12 ou plus ; sans avertissement depuis la 22.13).
 // La pause est COOPÉRATIVE : le moteur n'a pas de pause native. L'adaptateur retient la boucle d'une session ou d'un agent avant sa prochaine
 // requête au modèle et avant son prochain outil ; une réponse en cours d'écriture ou un outil déjà lancé va jusqu'au bout. Seul le bouton
 // Stop de l'application interrompt sur-le-champ.

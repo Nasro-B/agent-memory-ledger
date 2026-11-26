@@ -502,7 +502,7 @@ describe('instantané et rendu', () => {
       { nom: 'APP', branche: 'b', sale: 0, constats: { propre: true, egalMain: true, egalDistant: true, mainEgalDistant: true, distantEgalMainDistant: true }, vsMain: { ahead: 0, behind: 0 }, vsDistant: { ahead: 0, behind: 0 }, erreurs: [] },
       { nom: 'API', branche: 'b2', sale: 3, constats: { propre: false, egalMain: false, egalDistant: false, mainEgalDistant: true, distantEgalMainDistant: true }, vsMain: { ahead: 2, behind: 0 }, vsDistant: { ahead: 2, behind: 0 }, erreurs: [] },
     ] });
-    // Remise à zéro toujours dans le futur : une date fixe (2026-03-09) rendait la mesure « périmée » et le banc rouge après cette date.
+    // Remise à zéro toujours dans le futur : une date fixe rendrait un jour la mesure « périmée » et le banc rouge.
     core.ecrireQuota('claude', { fenetres: [{ nom: '7 j', pct: 71, resetsAt: new Date(Date.now() + 3 * 86400000).toISOString() }], source: 'banc' });
     return { worktrees: [], plans: { dossier: plansDir, exclure: [], profondeur: 1 } };
   }
@@ -733,8 +733,8 @@ describe('instantané et rendu', () => {
     core.ecrireQuota('claude', { fenetres: [{ nom: '5 h', pct: 40.4 }, { nom: '7 j', pct: 71.6 }, { nom: 'x', pct: null }] });
     core.ecrireQuota('codex', { fenetres: [{ nom: '7 j', pct: 3 }] });
     const l = core.ligneCockpit(core.instantane({ worktrees: [], plans: { dossier: path.join(RUN, 'rien'), exclure: [], profondeur: 1 } }));
-    assert.match(l, /quota claude 5 h 40 % consommes, 60 % restants, 7 j 72 % consommes, 28 % restants, x \? %/);
-    assert.match(l, /codex 7 j 3 % consommes, 97 % restants/);
+    assert.match(l, /quota claude 5 h 40 % consommés, 60 % restants, 7 j 72 % consommés, 28 % restants, x \? %/);
+    assert.match(l, /codex 7 j 3 % consommés, 97 % restants/);
   });
 
   test('ligneCockpit dit chaque constat avec ses chiffres et omet ce qui est à zéro', () => {

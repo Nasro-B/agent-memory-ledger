@@ -490,7 +490,7 @@ function segmentQuota(quota) {
     const fenetres = actives.map(f => {
       if (!Number.isFinite(f.pct) || f.pct < 0 || f.pct > 100) return `${f.nom} ? %`;
       const utilise = Math.round(f.pct);
-      return `${f.nom} ${utilise} % consommes, ${100 - utilise} % restants`;
+      return `${f.nom} ${utilise} % consommés, ${100 - utilise} % restants`;
     });
     parts.push(`${agent} ${fenetres.join(', ')} (${source}, ${ancienne ? 'ancienne ' : ''}${heure})`);
   }
