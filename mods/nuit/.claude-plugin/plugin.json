@@ -1,0 +1,19 @@
+{
+  "name": "nuit",
+  "version": "0.13.0",
+  "description": "Quand l'utilisateur est absent ou dit /nuit : ses questions bloquantes vont en boîte au lieu d'attendre, les arrêts de garde deviennent des refus avec alternative, le travail continue sur les lignes ouvertes de la liste de travail, et un récap avec boutons l'attend au réveil. État et boîte partagés avec Codex et le Cockpit.",
+  "author": {
+    "name": "Nasro-B"
+  },
+  "homepage": "https://github.com/Nasro-B/agent-memory-ledger",
+  "repository": "https://github.com/Nasro-B/agent-memory-ledger",
+  "license": "MIT",
+  "keywords": [
+    "nuit",
+    "absence",
+    "boite",
+    "claude-code",
+    "module"
+  ],
+  "types": "./types/index.d.ts"
+}

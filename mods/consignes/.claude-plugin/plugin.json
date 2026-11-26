@@ -1,0 +1,18 @@
+{
+  "name": "consignes",
+  "version": "0.13.0",
+  "description": "Les ordres permanents de l'utilisateur, rappelés à chaque requête (donc intacts après un compactage), et refusés par le code quand il peut les vérifier : push, déploiement, rebuild, nouvel agent. Liste partagée avec Codex et le Cockpit.",
+  "author": {
+    "name": "Nasro-B"
+  },
+  "homepage": "https://github.com/Nasro-B/agent-memory-ledger",
+  "repository": "https://github.com/Nasro-B/agent-memory-ledger",
+  "license": "MIT",
+  "keywords": [
+    "consignes",
+    "verrous",
+    "ordres-permanents",
+    "claude-code",
+    "module"
+  ]
+}

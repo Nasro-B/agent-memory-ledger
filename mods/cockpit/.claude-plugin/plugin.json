@@ -1,0 +1,19 @@
+{
+  "name": "cockpit",
+  "version": "0.13.0",
+  "description": "Bande et panneau d'état du travail : liste de travail, sous-agents, git des dépôts suivis, plans, quota, et les réglages du Cockpit. Le panneau lance les commandes du Cockpit (modèles des agents, dépôts suivis, pause).",
+  "author": {
+    "name": "Nasro-B"
+  },
+  "homepage": "https://github.com/Nasro-B/agent-memory-ledger",
+  "repository": "https://github.com/Nasro-B/agent-memory-ledger",
+  "license": "MIT",
+  "keywords": [
+    "cockpit",
+    "etat",
+    "panneau",
+    "claude-code",
+    "module"
+  ],
+  "types": "./types/index.d.ts"
+}

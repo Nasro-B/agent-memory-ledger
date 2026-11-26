@@ -1,0 +1,19 @@
+{
+  "name": "pause",
+  "version": "0.13.0",
+  "description": "Pause et reprise des sessions et des agents : boutons Pause et Reprendre dans la bande au-dessus du prompt, commandes /pause et /reprendre. La pause est coopérative (la boucle s'arrête avant sa prochaine étape ou son prochain outil, Stop reste l'arrêt immédiat). État partagé entre toutes les sessions et avec le Cockpit.",
+  "author": {
+    "name": "Nasro-B"
+  },
+  "homepage": "https://github.com/Nasro-B/agent-memory-ledger",
+  "repository": "https://github.com/Nasro-B/agent-memory-ledger",
+  "license": "MIT",
+  "keywords": [
+    "pause",
+    "sessions",
+    "agents",
+    "claude-code",
+    "module"
+  ],
+  "types": "./types/index.d.ts"
+}

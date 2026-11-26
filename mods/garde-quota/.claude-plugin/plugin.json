@@ -1,0 +1,18 @@
+{
+  "name": "garde-quota",
+  "version": "0.13.0",
+  "description": "Les fenêtres de quota que le moteur rapporte, sous le prompt ; alertes à 80 % puis 90 % (avec un son), blocage des nouveaux agents et consigne de relais au seuil critique. Mesure partagée avec Codex et le Cockpit.",
+  "author": {
+    "name": "Nasro-B"
+  },
+  "homepage": "https://github.com/Nasro-B/agent-memory-ledger",
+  "repository": "https://github.com/Nasro-B/agent-memory-ledger",
+  "license": "MIT",
+  "keywords": [
+    "quota",
+    "alertes",
+    "agents",
+    "claude-code",
+    "module"
+  ]
+}

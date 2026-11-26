@@ -9,7 +9,61 @@
       "name": "agent-memory-ledger",
       "source": "./",
       "description": "Mémoire partagée et liste de travail pour agents de code (Claude Code et Codex) : chaque message devient une ligne de travail qui ne disparaît que sur preuve, les résultats de sous-agents ne s'oublient plus, chaque sous-agent garde sa mission sur une fiche, l'historique survit aux compactages ; trois gardes réglables (commandes dangereuses, rappel avant commit, caractères invisibles).",
-      "version": "0.12.0",
+      "version": "0.13.0",
+      "author": {
+        "name": "Nasro-B"
+      }
+    },
+    {
+      "name": "consignes",
+      "source": "./mods/consignes",
+      "description": "Les ordres permanents de l'utilisateur, rappelés à chaque requête (donc intacts après un compactage), et refusés par le code quand il peut les vérifier : push, déploiement, rebuild, nouvel agent. Liste partagée avec Codex et le Cockpit.",
+      "version": "0.13.0",
+      "author": {
+        "name": "Nasro-B"
+      }
+    },
+    {
+      "name": "garde-quota",
+      "source": "./mods/garde-quota",
+      "description": "Les fenêtres de quota que le moteur rapporte, sous le prompt ; alertes à 80 % puis 90 % (avec un son), blocage des nouveaux agents et consigne de relais au seuil critique. Mesure partagée avec Codex et le Cockpit.",
+      "version": "0.13.0",
+      "author": {
+        "name": "Nasro-B"
+      }
+    },
+    {
+      "name": "regulateur",
+      "source": "./mods/regulateur",
+      "description": "Plafond d'agents en parallèle, pause, file d'attente des agents refusés, relance des échoués, modèle par type d'agent, et rappel permanent de la politique. Politique et file partagées avec Codex et le Cockpit.",
+      "version": "0.13.0",
+      "author": {
+        "name": "Nasro-B"
+      }
+    },
+    {
+      "name": "pause",
+      "source": "./mods/pause",
+      "description": "Pause et reprise des sessions et des agents : boutons Pause et Reprendre dans la bande au-dessus du prompt, commandes /pause et /reprendre. La pause est coopérative (la boucle s'arrête avant sa prochaine étape ou son prochain outil, Stop reste l'arrêt immédiat). État partagé entre toutes les sessions et avec le Cockpit.",
+      "version": "0.13.0",
+      "author": {
+        "name": "Nasro-B"
+      }
+    },
+    {
+      "name": "nuit",
+      "source": "./mods/nuit",
+      "description": "Quand l'utilisateur est absent ou dit /nuit : ses questions bloquantes vont en boîte au lieu d'attendre, les arrêts de garde deviennent des refus avec alternative, le travail continue sur les lignes ouvertes de la liste de travail, et un récap avec boutons l'attend au réveil. État et boîte partagés avec Codex et le Cockpit.",
+      "version": "0.13.0",
+      "author": {
+        "name": "Nasro-B"
+      }
+    },
+    {
+      "name": "cockpit",
+      "source": "./mods/cockpit",
+      "description": "Bande et panneau d'état du travail : liste de travail, sous-agents, git des dépôts suivis, plans, quota, et les réglages du Cockpit. Le panneau lance les commandes du Cockpit (modèles des agents, dépôts suivis, pause).",
+      "version": "0.13.0",
       "author": {
         "name": "Nasro-B"
       }

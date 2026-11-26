@@ -2,3 +2,5 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+# Types du moteur de Claude Code, générés par l'application dans chaque module : ils ne se publient pas.
+mods/*/.claude-plugin/types/
