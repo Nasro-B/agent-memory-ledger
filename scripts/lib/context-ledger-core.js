@@ -1441,9 +1441,12 @@ function enregistrerMessage({ agent, sessionId, promptId, cwd, texte }) {
 // Textes soumis par une machine, que l'événement « message de l'utilisateur » apporte comme s'ils venaient de
 // lui : Codex soumet de lui-même une demande de message suggéré, qui n'est pas un travail à faire. Le début est
 // celui, exact, de la demande de l'application. Un enchaînement automatique d'un outil tiers se traite de la même
-// façon : ajouter son début à cette liste.
+// façon : ajouter son début à cette liste. L'enchaînement de la Nuit (nuit-logique.mjs, texteContinuation : le préfixe « NUIT : » puis
+// « L'utilisateur est absent. Continue sans l'attendre ») est soumis au modèle par l'adaptateur lui-même ; les réponses de la boîte de la Nuit
+// commencent par le même préfixe mais portent une décision de l'utilisateur : seul le début de l'enchaînement est donc exact ici.
 const DEBUTS_DE_MACHINE = [
   'This is an app-generated request for a suggested next user message.',
+  'NUIT : L\'utilisateur est absent. Continue sans l\'attendre', // ancre-mutation:nuit-continuation
 ];
 function texteDeMachine(texte) {
   const debut = chaine(texte).trimStart();

@@ -1037,7 +1037,7 @@ describe('ligne de commande', () => {
     assert.equal(json.ligne, 'Cockpit | ledger 1 ouverte | git ? | plans 50 % (1/2)', 'le JSON porte la ligne rendue par le noyau : un panneau ne la recalcule pas');
     const inconnue = spawnSync(process.execPath, [CLI, 'nimporte'], { env, encoding: 'utf8' });
     assert.notEqual(inconnue.status, 0);
-    assert.match(inconnue.stderr, /commande inconnue : nimporte \(attendu : ligne, instantane \[--json\], rafraichir-git, config\)/);
+    assert.match(inconnue.stderr, /commande inconnue : nimporte \(attendu : ligne, instantane \[--json\], rafraichir-git, politique, quota, config, consignes, nuit, nuit-hook, pause, reprendre, pause-hook\)/);
   });
 
   test('cockpit.js rafraichir-git mesure les worktrees de la config, la ligne relit la mesure, et un verrou actif est respecté', () => {

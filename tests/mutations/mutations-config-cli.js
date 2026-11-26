@@ -4,7 +4,8 @@
 //   node tests/mutations/mutations-config-cli.js nom1 nom2       seulement celles nommées
 //   node tests/mutations/mutations-config-cli.js --ancres        vérifie sans lancer le banc que chaque ancre existe une fois
 // Les autres commandes de cockpit.js ne sont pas mutées ici : ligne, instantane et rafraichir-git sont couvertes par des essais réels du banc
-// (processus lancés), et les commandes des autres noyaux viendront avec eux.
+// (processus lancés), et les commandes des autres noyaux (politique, quota, consignes, nuit, pause) sont mutées par leurs propres scripts
+// (mutations-<module>-cli.js). Le message d'usage de la commande inconnue liste toutes les commandes : cette mutation retire config de la liste.
 
 const path = require('node:path');
 const { executer } = require('../lib/mutations-fichier.js');
@@ -20,7 +21,7 @@ const MUTATIONS = [
   { nom: 'config-cli-message-perdu', suite: 'ligne de commande', de: APPEL, vers: APPEL.replace('else process.stdout.write(`${r.message}\\n`);', 'else process.stdout.write(``);') },
   { nom: 'config-cli-erreur-ignoree', suite: 'ligne de commande', de: APPEL, vers: APPEL.replace('if (r.erreur) {', 'if (false) {') },
   { nom: 'config-cli-commande-absente', suite: 'ligne de commande', de: "    case 'config': {", vers: "    case 'configs': {" },
-  { nom: 'config-cli-usage-sans-config', suite: 'ligne de commande', de: 'rafraichir-git, config)', vers: 'rafraichir-git)' },
+  { nom: 'config-cli-usage-sans-config', suite: 'ligne de commande', de: 'quota, config, consignes', vers: 'quota, consignes' },
 ];
 
 executer({
@@ -31,6 +32,11 @@ executer({
   // La copie mutée vit dans un dossier temporaire : ses require relatifs deviennent absolus.
   reecritures: [
     ["require('./lib/cockpit-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'cockpit-core.js'))})`],
+    ["require('./lib/regulateur-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'regulateur-core.js'))})`],
+    ["require('./lib/quota-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'quota-core.js'))})`],
+    ["require('./lib/consignes-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'consignes-core.js'))})`],
+    ["require('./lib/nuit-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'nuit-core.js'))})`],
+    ["require('./lib/pause-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'pause-core.js'))})`],
     ["require('./lib/modeles-agents-core.js')", `require(${JSON.stringify(path.join(SCRIPTS, 'lib', 'modeles-agents-core.js'))})`],
   ],
   argv: process.argv.slice(2),

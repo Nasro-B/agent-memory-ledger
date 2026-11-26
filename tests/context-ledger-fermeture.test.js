@@ -114,6 +114,31 @@ test('texte de machine : la demande de message suggéré de l\'application n\'es
   assert.equal(core.texteDeMachine(undefined), false);
 });
 
+// L'enchaînement que la Nuit soumet au modèle (le texte de nuit-logique.mjs) n'est pas un message de l'utilisateur ; une réponse de la boîte,
+// qui commence par le même préfixe, porte une décision de l'utilisateur et en est un.
+const NUIT_LOGIQUE = require(path.join(__dirname, '..', 'scripts', 'lib', 'nuit-logique.mjs'));
+const ENCHAINEMENT_NUIT = NUIT_LOGIQUE.texteContinuation({ ligne: { id: 'C-0001', texte: 'corriger le total du panier' }, restantes: 2, tours: 1, maxTours: 60 });
+const REPONSE_BOITE = NUIT_LOGIQUE.texteReponse({ id: 3, type: 'question', titre: 'Quel nom ?', reponse: 'Veilleur' });
+
+test('texte de machine : l\'enchaînement de la Nuit n\'est pas un message de l\'utilisateur, la réponse de la boîte en est un', () => {
+  assert.ok(ENCHAINEMENT_NUIT.startsWith(NUIT_LOGIQUE.PREFIXE_CONTINUATION) && REPONSE_BOITE.startsWith(NUIT_LOGIQUE.PREFIXE_CONTINUATION), 'les deux commencent par le même préfixe');
+  assert.equal(core.texteDeMachine(ENCHAINEMENT_NUIT), true);
+  assert.equal(core.texteDeMachine(`  \n${ENCHAINEMENT_NUIT}`), true);
+  assert.equal(core.texteDeMachine(REPONSE_BOITE), false, 'la réponse de la boîte porte une décision de l\'utilisateur');
+  assert.equal(core.texteDeMachine(`${NUIT_LOGIQUE.PREFIXE_CONTINUATION}L'utilisateur est absent.`), false, 'le début exact est exigé');
+  assert.equal(core.texteDeMachine(`Je rappelle : ${ENCHAINEMENT_NUIT}`), false);
+});
+
+test('hook : un texte de machine de la Nuit : l\'enchaînement ne reçoit pas de numéro M, la réponse de la boîte en reçoit un', () => {
+  const dir = dossier('machine-nuit');
+  const base = { hook_event_name: 'UserPromptSubmit', session_id: 'sess-machine-nuit', cwd: CWD_PROJET };
+  hook(dir, { ...base, prompt_id: 'p1', prompt: ENCHAINEMENT_NUIT });
+  assert.equal(Object.keys(avecRacine(dir, () => core.lireLedger(PROJET, AGENT)).demandes).length, 0, 'l\'enchaînement de la Nuit ne doit pas devenir un message à trier');
+  const r = hook(dir, { ...base, prompt_id: 'p2', prompt: REPONSE_BOITE });
+  assert.deepEqual(Object.values(avecRacine(dir, () => core.lireLedger(PROJET, AGENT)).demandes).map(d => d.texte), [REPONSE_BOITE]);
+  assert.match(r.texte, /Nouveau message M-\d+/);
+});
+
 test('hook : un texte de machine ne reçoit pas de numéro M, un message de l\'utilisateur en reçoit un', () => {
   const dir = dossier('machine');
   const base = { hook_event_name: 'UserPromptSubmit', session_id: 'sess-machine', cwd: CWD_PROJET };
@@ -518,6 +543,7 @@ test('mutation : mentions, commits lus (dossiers, sortie), commit sans mention, 
   const mutations = [
     ['filtre-proposition', '    const ligne = t.slice(debut, fin < 0 ? t.length : fin); // MUTATION : le filtre regarde la ligne entière', /not ok \d+ - mention complète : un mot négatif dans une AUTRE/, NOYAU, '^mention complète'],
     ['texte-de-machine', '  return false; // MUTATION : tout texte est un message de l\'utilisateur', /not ok \d+ - texte de machine/, NOYAU, '^texte de machine'],
+    ['nuit-continuation', '  // MUTATION : l\'enchaînement de la Nuit n\'est plus reconnu comme un texte de machine', /not ok \d+ - texte de machine : l.enchaînement de la Nuit/, NOYAU, '^texte de machine'],
     ['machine-non-enregistree', '  if (false) { // MUTATION : le texte de machine est enregistré comme un message', /not ok \d+ - hook : un texte de machine/, ADAPTATEUR, '^hook : un texte de machine'],
     ['commit-dossiers', '  for (const dossier of [rc.gitCwd]) { // MUTATION : seul le dossier d\'avant', /not ok \d+ - commit : la mention est lue quand le commit suit un changement de dossier/, NOYAU, '^commit : la mention'],
     ['sortie-sha', '    // MUTATION : SHA de la sortie jamais retenu', /not ok \d+ - commit fait par un script : sa sortie/, NOYAU, '^commit fait par un script : sa sortie'],
